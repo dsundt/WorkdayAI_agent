@@ -4,6 +4,7 @@ import json
 import smtplib
 import ssl
 import re
+import copy
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo  # stdlib timezone support (Py 3.9+)
@@ -37,6 +38,105 @@ RESPONSES_JSON_SCHEMA = {
         "schema": {"type": "object"},
     },
 }
+
+
+def _unique_payload_variants(payloads: list[dict]) -> list[dict]:
+    """Return payload variants with duplicates removed while preserving order."""
+
+    seen: set[str] = set()
+    unique: list[dict] = []
+    for payload in payloads:
+        try:
+            key = json.dumps(payload, sort_keys=True)
+        except TypeError:
+            # Fallback to repr for objects that are not JSON serializable (should not occur)
+            key = repr(payload)
+        if key not in seen:
+            seen.add(key)
+            unique.append(payload)
+    return unique
+
+
+def _responses_payload_variants(model: str, system_prompt: str, user_prompt: str) -> list[dict]:
+    """Build payload variants for the Responses API to maximize compatibility."""
+
+    base = {
+        "model": model,
+        "response_format": RESPONSES_JSON_SCHEMA,
+        "modalities": ["text"],
+        "input": [
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": system_prompt}],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": user_prompt}],
+            },
+        ],
+        "temperature": 0,
+    }
+
+    variants = [base]
+
+    # Some deployments reject json_schema; fall back to json_object, then to no schema.
+    json_object_variant = copy.deepcopy(base)
+    json_object_variant["response_format"] = {"type": "json_object"}
+    variants.append(json_object_variant)
+
+    no_modalities_variant = copy.deepcopy(json_object_variant)
+    no_modalities_variant.pop("modalities", None)
+    variants.append(no_modalities_variant)
+
+    no_schema_variant = copy.deepcopy(no_modalities_variant)
+    no_schema_variant.pop("response_format", None)
+    variants.append(no_schema_variant)
+
+    return _unique_payload_variants(variants)
+
+
+def _chat_payload_variants(model: str, system_prompt: str, user_prompt: str) -> list[dict]:
+    """Build payload variants for the Chat Completions API."""
+
+    base = {
+        "model": model,
+        "response_format": RESPONSES_JSON_SCHEMA,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0,
+    }
+
+    variants = [base]
+
+    json_object_variant = copy.deepcopy(base)
+    json_object_variant["response_format"] = {"type": "json_object"}
+    variants.append(json_object_variant)
+
+    no_schema_variant = copy.deepcopy(json_object_variant)
+    no_schema_variant.pop("response_format", None)
+    variants.append(no_schema_variant)
+
+    return _unique_payload_variants(variants)
+
+
+def _summarize_http_error(err: Exception) -> str:
+    """Return a short string summarizing an HTTP error response body."""
+
+    response = getattr(err, "response", None)
+    if response is None:
+        return ""
+    try:
+        text = response.text or ""
+    except Exception:
+        return ""
+    text = text.strip().replace("\n", " ")
+    if not text:
+        return ""
+    if len(text) > 240:
+        text = text[:240] + "…"
+    return text
 
 # ====== Args ======
 if len(sys.argv) < 2 or sys.argv[1] not in ("daily", "weekly", "verify"):
@@ -488,47 +588,63 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
         # Attempt 1: Responses API with string input (portable shape)
         try:
             responses_url = "https://api.openai.com/v1/responses"
-            responses_payload = {
-                "model": model_in_use,
-                "response_format": RESPONSES_JSON_SCHEMA,
-                "modalities": ["text"],
-                # Supply separate system/user turns to match ChatGPT behaviour closely.
-                "input": [
-                    {
-                        "role": "system",
-                        "content": [{"type": "text", "text": system_prompt}],
-                    },
-                    {
-                        "role": "user",
-                        "content": [{"type": "text", "text": USER_PROMPT_SCHEMA}],
-                    },
-                ],
-                # Force determinism so Pages/email match ChatGPT runs more closely
-                "temperature": 0,
-            }
             if mode in ("auto", "responses"):
-                resp = requests.post(responses_url, headers=headers, json=responses_payload, timeout=120)
-                resp.raise_for_status()
-                data = resp.json()
-                content = _extract_text_from_responses_api_payload(data)
-                if not content:
-                    raise RuntimeError("Responses API did not include content in an expected format")
-                payload = _coerce_json(content)
-                payload["_debug_endpoint"] = "responses"
-                payload["_debug_model"] = model_in_use
-                payload["_debug_prompt"] = combined_prompt
-                payload["_debug_raw_http_json"] = data
-                payload["_debug_content"] = content
-                # Retain a deep-ish copy of the parsed payload prior to any post-processing
-                try:
-                    payload["_debug_parsed_from_content"] = json.loads(json.dumps(payload, ensure_ascii=False))
-                except Exception:
-                    pass
-                return payload
+                responses_variants = _responses_payload_variants(
+                    model_in_use, system_prompt, USER_PROMPT_SCHEMA
+                )
+                responses_error: Exception | None = None
+                for idx, payload_variant in enumerate(responses_variants):
+                    try:
+                        resp = requests.post(
+                            responses_url,
+                            headers=headers,
+                            json=payload_variant,
+                            timeout=120,
+                        )
+                        resp.raise_for_status()
+                    except Exception as request_error:
+                        responses_error = request_error
+                        if requests is not None and isinstance(request_error, requests.HTTPError):
+                            response = getattr(request_error, "response", None)
+                            status = getattr(response, "status_code", None)
+                            if status == 400 and idx + 1 < len(responses_variants):
+                                summary = _summarize_http_error(request_error)
+                                if summary:
+                                    print(
+                                        f"Responses API 400 with variant {idx + 1}/{len(responses_variants)}: {summary}",
+                                        file=sys.stderr,
+                                    )
+                                continue
+                        raise
+
+                    data = resp.json()
+                    content = _extract_text_from_responses_api_payload(data)
+                    if not content:
+                        raise RuntimeError("Responses API did not include content in an expected format")
+                    payload = _coerce_json(content)
+                    payload["_debug_endpoint"] = "responses"
+                    payload["_debug_model"] = model_in_use
+                    payload["_debug_prompt"] = combined_prompt
+                    payload["_debug_raw_http_json"] = data
+                    payload["_debug_content"] = content
+                    # Retain a deep-ish copy of the parsed payload prior to any post-processing
+                    try:
+                        payload["_debug_parsed_from_content"] = json.loads(
+                            json.dumps(payload, ensure_ascii=False)
+                        )
+                    except Exception:
+                        pass
+                    return payload
+
+                if responses_error:
+                    raise responses_error
         except Exception as e_responses:
             last_error = e_responses
             if mode in ("auto", "responses"):
-                print(f"Responses API failed, falling back to Chat Completions: {e_responses}", file=sys.stderr)
+                print(
+                    f"Responses API failed, falling back to Chat Completions: {e_responses}",
+                    file=sys.stderr,
+                )
                 # If the caller explicitly requested only Responses, keep trying other models; if none succeed, return stub later
                 if mode == "responses":
                     continue
@@ -536,38 +652,61 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
         # Attempt 2: Chat Completions (widely supported)
         try:
             chat_url = "https://api.openai.com/v1/chat/completions"
-            chat_payload = {
-                "model": model_in_use,
-                "response_format": RESPONSES_JSON_SCHEMA,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": USER_PROMPT_SCHEMA},
-                ],
-                "temperature": 0,
-            }
             if mode in ("auto", "chat"):
-                resp = requests.post(chat_url, headers=headers, json=chat_payload, timeout=120)
-                resp.raise_for_status()
-                data = resp.json()
-                try:
-                    content = data["choices"][0]["message"]["content"]
-                except Exception as e_extract:
-                    raise RuntimeError(f"Chat Completions content extraction failed: {e_extract}")
-                payload = _coerce_json(content)
-                payload["_debug_endpoint"] = "chat"
-                payload["_debug_model"] = model_in_use
-                payload["_debug_prompt"] = combined_prompt
-                payload["_debug_raw_http_json"] = data
-                payload["_debug_content"] = content
-                try:
-                    payload["_debug_parsed_from_content"] = json.loads(json.dumps(payload, ensure_ascii=False))
-                except Exception:
-                    pass
-                return payload
+                chat_variants = _chat_payload_variants(model_in_use, system_prompt, USER_PROMPT_SCHEMA)
+                chat_error: Exception | None = None
+                for idx, payload_variant in enumerate(chat_variants):
+                    try:
+                        resp = requests.post(
+                            chat_url,
+                            headers=headers,
+                            json=payload_variant,
+                            timeout=120,
+                        )
+                        resp.raise_for_status()
+                    except Exception as request_error:
+                        chat_error = request_error
+                        if requests is not None and isinstance(request_error, requests.HTTPError):
+                            response = getattr(request_error, "response", None)
+                            status = getattr(response, "status_code", None)
+                            if status == 400 and idx + 1 < len(chat_variants):
+                                summary = _summarize_http_error(request_error)
+                                if summary:
+                                    print(
+                                        f"Chat Completions 400 with variant {idx + 1}/{len(chat_variants)}: {summary}",
+                                        file=sys.stderr,
+                                    )
+                                continue
+                        raise
+
+                    data = resp.json()
+                    try:
+                        content = data["choices"][0]["message"]["content"]
+                    except Exception as e_extract:
+                        raise RuntimeError(f"Chat Completions content extraction failed: {e_extract}")
+                    payload = _coerce_json(content)
+                    payload["_debug_endpoint"] = "chat"
+                    payload["_debug_model"] = model_in_use
+                    payload["_debug_prompt"] = combined_prompt
+                    payload["_debug_raw_http_json"] = data
+                    payload["_debug_content"] = content
+                    try:
+                        payload["_debug_parsed_from_content"] = json.loads(
+                            json.dumps(payload, ensure_ascii=False)
+                        )
+                    except Exception:
+                        pass
+                    return payload
+
+                if chat_error:
+                    raise chat_error
         except Exception as e_chat:
             last_error = e_chat
             if mode in ("auto", "chat"):
-                print(f"OpenAI Chat Completions failed, using stub payload: {e_chat}", file=sys.stderr)
+                print(
+                    f"OpenAI Chat Completions failed, using stub payload: {e_chat}",
+                    file=sys.stderr,
+                )
                 # In chat-only mode, return stub immediately; in auto, try next model
                 if mode == "chat":
                     return _build_stub_payload(run_type)
