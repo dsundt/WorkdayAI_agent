@@ -21,13 +21,22 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 # Allow overriding model from environment; choose a strong default for best results
 # Prefer widely available, JSON-mode compatible default
 # Users can override via OPENAI_MODEL
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip()
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "o4-mini").strip()
 # Preserve model-provided HTML exactly by default to match ChatGPT UI
 PRESERVE_MODEL_HTML = os.environ.get("PRESERVE_MODEL_HTML", "1").strip() == "1"
 EMAIL_FROM = os.environ.get("EMAIL_FROM", "").strip()
 EMAIL_TO = os.environ.get("EMAIL_TO", "").strip()
 GMAIL_USERNAME = os.environ.get("GMAIL_USERNAME", "").strip()
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "").strip()
+
+RESPONSES_JSON_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "workday_ai_report",
+        # Allow the model to return any JSON object; validation happens later.
+        "schema": {"type": "object"},
+    },
+}
 
 # ====== Args ======
 if len(sys.argv) < 2 or sys.argv[1] not in ("daily", "weekly", "verify"):
@@ -365,7 +374,17 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
     combined_prompt = f"{system_prompt}\n\n{USER_PROMPT_SCHEMA}"
     # Build model candidate list with sensible fallbacks
     configured_model = (OPENAI_MODEL or "").strip()
-    candidate_models: list[str] = [m for m in [configured_model, "gpt-4o-mini", "gpt-4o"] if m]
+    candidate_models: list[str] = [
+        m
+        for m in [
+            configured_model,
+            "o4-mini",
+            "gpt-4.1-mini",
+            "gpt-4o-mini",
+            "gpt-4o",
+        ]
+        if m
+    ]
     # De-duplicate while preserving order
     seen_models: set[str] = set()
     candidate_models = [m for m in candidate_models if not (m in seen_models or seen_models.add(m))]
@@ -394,6 +413,13 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
             if isinstance(output_text, str) and output_text.strip():
                 return output_text
 
+            # Newer Responses API payloads wrap text inside nested content blocks.
+            response_obj = data.get("response")
+            if isinstance(response_obj, dict):
+                nested = response_obj.get("output")
+                if nested:
+                    data = {"output": nested}
+
             if "output" in data:
                 output_val = data["output"]
                 if isinstance(output_val, str) and output_val.strip():
@@ -407,6 +433,15 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
                             text_candidate = item.get("content") or item.get("text")
                             if isinstance(text_candidate, str) and text_candidate.strip():
                                 return text_candidate
+                            content_list = item.get("content")
+                            if isinstance(content_list, list):
+                                for block in content_list:
+                                    if isinstance(block, str) and block.strip():
+                                        return block
+                                    if isinstance(block, dict):
+                                        block_text = block.get("text") or block.get("content")
+                                        if isinstance(block_text, str) and block_text.strip():
+                                            return block_text
 
             # Some deployments proxy Responses to Chat Completions-like shape
             try:
@@ -455,9 +490,19 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
             responses_url = "https://api.openai.com/v1/responses"
             responses_payload = {
                 "model": model_in_use,
-                "response_format": {"type": "json_object"},
-                # The Responses API expects a string (or tool/content blocks). Use a single string.
-                "input": combined_prompt,
+                "response_format": RESPONSES_JSON_SCHEMA,
+                "modalities": ["text"],
+                # Supply separate system/user turns to match ChatGPT behaviour closely.
+                "input": [
+                    {
+                        "role": "system",
+                        "content": [{"type": "text", "text": system_prompt}],
+                    },
+                    {
+                        "role": "user",
+                        "content": [{"type": "text", "text": USER_PROMPT_SCHEMA}],
+                    },
+                ],
                 # Force determinism so Pages/email match ChatGPT runs more closely
                 "temperature": 0,
             }
@@ -493,7 +538,7 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
             chat_url = "https://api.openai.com/v1/chat/completions"
             chat_payload = {
                 "model": model_in_use,
-                "response_format": {"type": "json_object"},
+                "response_format": RESPONSES_JSON_SCHEMA,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": USER_PROMPT_SCHEMA},

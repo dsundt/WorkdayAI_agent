@@ -23,9 +23,9 @@ This repo publishes daily and weekly Workday/AI briefs to `/docs` (served by Git
 
 ## Model
 
-- Default model is `gpt-4o-mini` (override with env `OPENAI_MODEL`).
-- Automatic fallbacks: `OPENAI_MODEL` → `gpt-4o-mini` → `gpt-4o`.
-- Responses and Chat Completions calls set `response_format={type: json_object}` and `temperature=0` to maximize determinism.
+- Default model is `o4-mini` (override with env `OPENAI_MODEL`).
+- Automatic fallbacks: `OPENAI_MODEL` → `o4-mini` → `gpt-4.1-mini` → `gpt-4o-mini` → `gpt-4o`.
+- Responses and Chat Completions calls set `response_format` to a permissive JSON schema and `temperature=0` to maximize determinism.
 - Set `PRESERVE_MODEL_HTML=1` (default) to render the model's `html_body` exactly. Set to `0` to enable link rewriting/normalization.
 
 ## Outputs
