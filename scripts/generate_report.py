@@ -19,18 +19,20 @@ except Exception:  # pragma: no cover - environment without requests
 # ====== Secrets / Env ======
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 # Allow overriding model from environment; choose a strong default for best results
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o").strip()
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5").strip()
+# Preserve model-provided HTML exactly by default to match ChatGPT UI
+PRESERVE_MODEL_HTML = os.environ.get("PRESERVE_MODEL_HTML", "1").strip() == "1"
 EMAIL_FROM = os.environ.get("EMAIL_FROM", "").strip()
 EMAIL_TO = os.environ.get("EMAIL_TO", "").strip()
 GMAIL_USERNAME = os.environ.get("GMAIL_USERNAME", "").strip()
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "").strip()
 
 # ====== Args ======
-if len(sys.argv) < 2 or sys.argv[1] not in ("daily", "weekly"):
-    print("Usage: python scripts/generate_report.py [daily|weekly]")
+if len(sys.argv) < 2 or sys.argv[1] not in ("daily", "weekly", "verify"):
+    print("Usage: python scripts/generate_report.py [daily|weekly|verify] [optional: daily|weekly for verify]")
     sys.exit(1)
 
-RUN_TYPE = sys.argv[1]  # "daily" or "weekly"
+RUN_TYPE = sys.argv[1]  # "daily" or "weekly" or "verify"
 
 # ====== Eastern Time Anchors ======
 # Fallback to UTC if the IANA tz database is unavailable in the environment.
@@ -130,6 +132,8 @@ Parameters:
 - Every item must include at least one absolute URL (https://…).
 - Keep total HTML under ~25KB.
 """.strip()
+
+DEBUG_DIR = os.path.join("docs", "debug")
 
 def _build_stub_payload(run_type: str) -> dict:
     title = "Workday HCM + AI (stub)"
@@ -237,6 +241,10 @@ def _rewrite_links_in_html(html_markup: str) -> str:
     if not html_markup:
         return html_markup
 
+    # Respect preservation flag; when enabled, do not alter model HTML
+    if PRESERVE_MODEL_HTML:
+        return html_markup
+
     a_tag_pattern = re.compile(r"<a\s+([^>]*?)href=([\'\"])(.*?)(?:\2)([^>]*)>", re.IGNORECASE)
 
     def _replacer(match: re.Match) -> str:
@@ -264,7 +272,7 @@ def _rewrite_links_in_html(html_markup: str) -> str:
 
 
 # ====== OpenAI Call ======
-def call_openai(run_type: str) -> dict:
+def call_openai(run_type: str, mode: str = "auto") -> dict:
     """Call OpenAI using the Responses API, with fallback to Chat Completions.
 
     If any API call fails or returns an unexpected payload, return a stub payload
@@ -273,7 +281,7 @@ def call_openai(run_type: str) -> dict:
     # Compute prompt data up-front so we can expose it in HTML for debugging
     system_prompt = SYSTEM_PROMPT_DAILY if run_type == "daily" else SYSTEM_PROMPT_WEEKLY
     combined_prompt = f"{system_prompt}\n\n{USER_PROMPT_SCHEMA}"
-    model_in_use = (OPENAI_MODEL or "gpt-4o").strip()
+    model_in_use = (OPENAI_MODEL or "gpt-5").strip()
 
     if not OPENAI_API_KEY:
         payload = _build_stub_payload(run_type)
@@ -358,21 +366,32 @@ def call_openai(run_type: str) -> dict:
             "response_format": {"type": "json_object"},
             # The Responses API expects a string (or tool/content blocks). Use a single string.
             "input": combined_prompt,
+            # Force determinism so Pages/email match ChatGPT runs more closely
+            "temperature": 0,
         }
-        resp = requests.post(responses_url, headers=headers, json=responses_payload, timeout=120)
-        resp.raise_for_status()
-        data = resp.json()
-        content = _extract_text_from_responses_api_payload(data)
-        if not content:
-            raise RuntimeError("Responses API did not include content in an expected format")
-        payload = _coerce_json(content)
-        payload["_debug_endpoint"] = "responses"
-        payload["_debug_model"] = model_in_use
-        payload["_debug_prompt"] = combined_prompt
-        return payload
+        if mode in ("auto", "responses"):
+            resp = requests.post(responses_url, headers=headers, json=responses_payload, timeout=120)
+            resp.raise_for_status()
+            data = resp.json()
+            content = _extract_text_from_responses_api_payload(data)
+            if not content:
+                raise RuntimeError("Responses API did not include content in an expected format")
+            payload = _coerce_json(content)
+            payload["_debug_endpoint"] = "responses"
+            payload["_debug_model"] = model_in_use
+            payload["_debug_prompt"] = combined_prompt
+            payload["_debug_raw_http_json"] = data
+            payload["_debug_content"] = content
+            # Retain a deep-ish copy of the parsed payload prior to any post-processing
+            try:
+                payload["_debug_parsed_from_content"] = json.loads(json.dumps(payload, ensure_ascii=False))
+            except Exception:
+                pass
+            return payload
     except Exception as e_responses:
         # Continue to Chat Completions fallback
-        print(f"Responses API failed, falling back to Chat Completions: {e_responses}", file=sys.stderr)
+        if mode in ("auto", "responses"):
+            print(f"Responses API failed, falling back to Chat Completions: {e_responses}", file=sys.stderr)
 
     # Attempt 2: Chat Completions (widely supported)
     try:
@@ -384,28 +403,38 @@ def call_openai(run_type: str) -> dict:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": USER_PROMPT_SCHEMA},
             ],
+            "temperature": 0,
         }
-        resp = requests.post(chat_url, headers=headers, json=chat_payload, timeout=120)
-        resp.raise_for_status()
-        data = resp.json()
-        try:
-            content = data["choices"][0]["message"]["content"]
-        except Exception as e_extract:
-            raise RuntimeError(f"Chat Completions content extraction failed: {e_extract}")
-        payload = _coerce_json(content)
-        payload["_debug_endpoint"] = "chat"
-        payload["_debug_model"] = model_in_use
-        payload["_debug_prompt"] = combined_prompt
-        return payload
+        if mode in ("auto", "chat"):
+            resp = requests.post(chat_url, headers=headers, json=chat_payload, timeout=120)
+            resp.raise_for_status()
+            data = resp.json()
+            try:
+                content = data["choices"][0]["message"]["content"]
+            except Exception as e_extract:
+                raise RuntimeError(f"Chat Completions content extraction failed: {e_extract}")
+            payload = _coerce_json(content)
+            payload["_debug_endpoint"] = "chat"
+            payload["_debug_model"] = model_in_use
+            payload["_debug_prompt"] = combined_prompt
+            payload["_debug_raw_http_json"] = data
+            payload["_debug_content"] = content
+            try:
+                payload["_debug_parsed_from_content"] = json.loads(json.dumps(payload, ensure_ascii=False))
+            except Exception:
+                pass
+            return payload
     except Exception as e_chat:
-        print(f"OpenAI Chat Completions failed, using stub payload: {e_chat}", file=sys.stderr)
-        return _build_stub_payload(run_type)
+        if mode in ("auto", "chat"):
+            print(f"OpenAI Chat Completions failed, using stub payload: {e_chat}", file=sys.stderr)
+            return _build_stub_payload(run_type)
+        raise
 
 # ====== Pages Writer ======
 def write_html_to_pages(run_type: str, payload: dict) -> str:
     target = "docs/index.html" if run_type == "daily" else "docs/weekly.html"
     html = payload.get("html_body", "<h2>No content</h2>")
-    # Rewrite and normalize links to reduce broken URLs
+    # Optionally rewrite and normalize links; default is to preserve model HTML
     html = _rewrite_links_in_html(html)
 
     # Append debug block showing the exact prompt sent to OpenAI
@@ -453,13 +482,142 @@ def send_email(payload: dict):
         server.login(GMAIL_USERNAME, GMAIL_APP_PASSWORD)
         server.sendmail(EMAIL_FROM, EMAIL_TO.split(","), msg.as_string())
 
+# ====== Post-processing and Verify ======
+def _postprocess_payload(run_type: str, payload: dict) -> dict:
+    """Apply minimal, non-destructive post-processing.
+
+    - Ensure type/run_date exist if omitted by the model (do not override if present)
+    """
+    processed = dict(payload)  # shallow copy is fine; values are primitives/strings
+    processed.setdefault("type", run_type)
+    processed.setdefault("run_date", TODAY_ET)
+    return processed
+
+
+def _ensure_debug_dir() -> None:
+    os.makedirs(DEBUG_DIR, exist_ok=True)
+
+
+def _write_json(path: str, obj: dict | list | str) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+
+
+def run_verify(default_run: str = "daily") -> int:
+    """Run a verification that compares model output vs rendered artifacts.
+
+    Writes artifacts into docs/debug and prints file paths.
+    Returns process exit code (0 success, 1 mismatch that matters or error).
+    """
+    verify_run = default_run if default_run in ("daily", "weekly") else "daily"
+    # Collect both endpoints to compare their raw content and parsed payloads
+    payload = call_openai(verify_run, mode="responses")
+    payload_chat = None
+    try:
+        payload_chat = call_openai(verify_run, mode="chat")
+    except Exception:
+        payload_chat = None
+
+    # Capture originals and post-processed versions
+    original = dict(payload)
+    processed = _postprocess_payload(verify_run, original)
+
+    # Compute HTML transformations that the app would apply
+    model_html = original.get("html_body", "") or ""
+    rewritten_html = _rewrite_links_in_html(model_html)
+    email_html = processed.get("html_body", "") or ""
+
+    html_preserved = (model_html == rewritten_html)
+    email_matches_model = (email_html == model_html)
+
+    # If the model provided run_date/type, ensure we did not override
+    model_run_date = None
+    model_type = None
+    try:
+        # Best-effort to parse from original content string to avoid any mutation
+        content_str = original.get("_debug_content", "") or ""
+        if content_str:
+            # Minimal coerce: strip fences if present
+            text = content_str.strip()
+            if text.startswith("```"):
+                lines = text.split("\n")
+                lines = lines[1:] if len(lines) > 1 else []
+                if lines and lines[-1].strip().startswith("```"):
+                    lines = lines[:-1]
+                text = "\n".join(lines).strip()
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                model_run_date = parsed.get("run_date")
+                model_type = parsed.get("type")
+    except Exception:
+        pass
+
+    run_date_preserved = True
+    type_preserved = True
+    if model_run_date:
+        run_date_preserved = (processed.get("run_date") == model_run_date)
+    if model_type:
+        type_preserved = (processed.get("type") == model_type)
+
+    # Build report
+    report = {
+        "endpoint": original.get("_debug_endpoint"),
+        "model": original.get("_debug_model"),
+        "run_type": verify_run,
+        "html_preserved": html_preserved,
+        "email_matches_model": email_matches_model,
+        "run_date_preserved": run_date_preserved,
+        "type_preserved": type_preserved,
+        "prompt_preview": (original.get("_debug_prompt") or "")[:3000],
+        "chat_endpoint_available": bool(payload_chat),
+    }
+
+    _ensure_debug_dir()
+    ts = TODAY_ET
+    # Save raw HTTP shape if present
+    raw_http = original.get("_debug_raw_http_json")
+    if raw_http is not None:
+        _write_json(os.path.join(DEBUG_DIR, f"{verify_run}-{ts}-raw-http.json"), raw_http)
+    # Save parsed payload exactly as used before post-processing
+    payload_to_save = dict(original)
+    # Avoid duplicating massive fields in the saved payload
+    payload_to_save.pop("_debug_raw_http_json", None)
+    _write_json(os.path.join(DEBUG_DIR, f"{verify_run}-{ts}-payload.json"), payload_to_save)
+    # Save chat variant if available
+    if payload_chat is not None:
+        chat_raw = payload_chat.get("_debug_raw_http_json")
+        if chat_raw is not None:
+            _write_json(os.path.join(DEBUG_DIR, f"{verify_run}-{ts}-chat-raw-http.json"), chat_raw)
+        payload_chat_to_save = dict(payload_chat)
+        payload_chat_to_save.pop("_debug_raw_http_json", None)
+        _write_json(os.path.join(DEBUG_DIR, f"{verify_run}-{ts}-chat-payload.json"), payload_chat_to_save)
+    # Save verification report
+    _write_json(os.path.join(DEBUG_DIR, f"{verify_run}-{ts}-verify.json"), report)
+
+    # Print a concise summary to stdout
+    print("Verify artifacts written to:")
+    print(os.path.join(DEBUG_DIR, f"{verify_run}-{ts}-raw-http.json"))
+    print(os.path.join(DEBUG_DIR, f"{verify_run}-{ts}-payload.json"))
+    print(os.path.join(DEBUG_DIR, f"{verify_run}-{ts}-verify.json"))
+    if payload_chat is not None:
+        print(os.path.join(DEBUG_DIR, f"{verify_run}-{ts}-chat-raw-http.json"))
+        print(os.path.join(DEBUG_DIR, f"{verify_run}-{ts}-chat-payload.json"))
+
+    # Determine exit code: mismatch that matters?
+    ok = html_preserved and email_matches_model and run_date_preserved and type_preserved
+    return 0 if ok else 1
+
 # ====== Main ======
 def main():
+    if RUN_TYPE == "verify":
+        verify_target = sys.argv[2] if len(sys.argv) >= 3 else "daily"
+        exit_code = run_verify(verify_target)
+        sys.exit(exit_code)
+
     payload = call_openai(RUN_TYPE)
 
-    # Enforce ET date and type in the outgoing JSON to stabilize email/Pages labels
-    payload.setdefault("type", RUN_TYPE)
-    payload["run_date"] = TODAY_ET  # ensure ET date even if model returns UTC or missing
+    # Minimal, non-destructive post-processing
+    payload = _postprocess_payload(RUN_TYPE, payload)
 
     # Write to Pages and email
     target_file = write_html_to_pages(RUN_TYPE, payload)
