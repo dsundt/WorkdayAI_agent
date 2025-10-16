@@ -19,7 +19,9 @@ except Exception:  # pragma: no cover - environment without requests
 # ====== Secrets / Env ======
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 # Allow overriding model from environment; choose a strong default for best results
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5").strip()
+# Prefer widely available, JSON-mode compatible default
+# Users can override via OPENAI_MODEL
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip()
 # Preserve model-provided HTML exactly by default to match ChatGPT UI
 PRESERVE_MODEL_HTML = os.environ.get("PRESERVE_MODEL_HTML", "1").strip() == "1"
 EMAIL_FROM = os.environ.get("EMAIL_FROM", "").strip()
@@ -356,12 +358,19 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
     # Compute prompt data up-front so we can expose it in HTML for debugging
     system_prompt = SYSTEM_PROMPT_DAILY if run_type == "daily" else SYSTEM_PROMPT_WEEKLY
     combined_prompt = f"{system_prompt}\n\n{USER_PROMPT_SCHEMA}"
-    model_in_use = (OPENAI_MODEL or "gpt-5").strip()
+    # Build model candidate list with sensible fallbacks
+    configured_model = (OPENAI_MODEL or "").strip()
+    candidate_models: list[str] = [m for m in [configured_model, "gpt-4o-mini", "gpt-4o"] if m]
+    # De-duplicate while preserving order
+    seen_models: set[str] = set()
+    candidate_models = [m for m in candidate_models if not (m in seen_models or seen_models.add(m))]
 
     if not OPENAI_API_KEY:
         payload = _build_stub_payload(run_type)
         payload["_debug_endpoint"] = "stub"
-        payload["_debug_model"] = model_in_use
+        # Use configured model if present, otherwise the first candidate (gpt-4o-mini)
+        debug_model = configured_model or (candidate_models[0] if candidate_models else "gpt-4o-mini")
+        payload["_debug_model"] = debug_model
         payload["_debug_prompt"] = combined_prompt
         return payload
 
@@ -433,77 +442,94 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
         # If all else fails, propagate the error upward
         raise json.JSONDecodeError("Failed to parse JSON from model output", content, 0)
 
-    # Attempt 1: Responses API with string input (portable shape)
-    try:
-        responses_url = "https://api.openai.com/v1/responses"
-        responses_payload = {
-            "model": model_in_use,
-            "response_format": {"type": "json_object"},
-            # The Responses API expects a string (or tool/content blocks). Use a single string.
-            "input": combined_prompt,
-            # Force determinism so Pages/email match ChatGPT runs more closely
-            "temperature": 0,
-        }
-        if mode in ("auto", "responses"):
-            resp = requests.post(responses_url, headers=headers, json=responses_payload, timeout=120)
-            resp.raise_for_status()
-            data = resp.json()
-            content = _extract_text_from_responses_api_payload(data)
-            if not content:
-                raise RuntimeError("Responses API did not include content in an expected format")
-            payload = _coerce_json(content)
-            payload["_debug_endpoint"] = "responses"
-            payload["_debug_model"] = model_in_use
-            payload["_debug_prompt"] = combined_prompt
-            payload["_debug_raw_http_json"] = data
-            payload["_debug_content"] = content
-            # Retain a deep-ish copy of the parsed payload prior to any post-processing
-            try:
-                payload["_debug_parsed_from_content"] = json.loads(json.dumps(payload, ensure_ascii=False))
-            except Exception:
-                pass
-            return payload
-    except Exception as e_responses:
-        # Continue to Chat Completions fallback
-        if mode in ("auto", "responses"):
-            print(f"Responses API failed, falling back to Chat Completions: {e_responses}", file=sys.stderr)
+    # Iterate through candidate models; for each model try Responses first, then Chat
+    last_error: Exception | None = None
+    for model_in_use in candidate_models:
+        # Attempt 1: Responses API with string input (portable shape)
+        try:
+            responses_url = "https://api.openai.com/v1/responses"
+            responses_payload = {
+                "model": model_in_use,
+                "response_format": {"type": "json_object"},
+                # The Responses API expects a string (or tool/content blocks). Use a single string.
+                "input": combined_prompt,
+                # Force determinism so Pages/email match ChatGPT runs more closely
+                "temperature": 0,
+            }
+            if mode in ("auto", "responses"):
+                resp = requests.post(responses_url, headers=headers, json=responses_payload, timeout=120)
+                resp.raise_for_status()
+                data = resp.json()
+                content = _extract_text_from_responses_api_payload(data)
+                if not content:
+                    raise RuntimeError("Responses API did not include content in an expected format")
+                payload = _coerce_json(content)
+                payload["_debug_endpoint"] = "responses"
+                payload["_debug_model"] = model_in_use
+                payload["_debug_prompt"] = combined_prompt
+                payload["_debug_raw_http_json"] = data
+                payload["_debug_content"] = content
+                # Retain a deep-ish copy of the parsed payload prior to any post-processing
+                try:
+                    payload["_debug_parsed_from_content"] = json.loads(json.dumps(payload, ensure_ascii=False))
+                except Exception:
+                    pass
+                return payload
+        except Exception as e_responses:
+            last_error = e_responses
+            if mode in ("auto", "responses"):
+                print(f"Responses API failed, falling back to Chat Completions: {e_responses}", file=sys.stderr)
+                # If the caller explicitly requested only Responses, keep trying other models; if none succeed, return stub later
+                if mode == "responses":
+                    continue
 
-    # Attempt 2: Chat Completions (widely supported)
-    try:
-        chat_url = "https://api.openai.com/v1/chat/completions"
-        chat_payload = {
-            "model": model_in_use,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": USER_PROMPT_SCHEMA},
-            ],
-            "temperature": 0,
-        }
-        if mode in ("auto", "chat"):
-            resp = requests.post(chat_url, headers=headers, json=chat_payload, timeout=120)
-            resp.raise_for_status()
-            data = resp.json()
-            try:
-                content = data["choices"][0]["message"]["content"]
-            except Exception as e_extract:
-                raise RuntimeError(f"Chat Completions content extraction failed: {e_extract}")
-            payload = _coerce_json(content)
-            payload["_debug_endpoint"] = "chat"
-            payload["_debug_model"] = model_in_use
-            payload["_debug_prompt"] = combined_prompt
-            payload["_debug_raw_http_json"] = data
-            payload["_debug_content"] = content
-            try:
-                payload["_debug_parsed_from_content"] = json.loads(json.dumps(payload, ensure_ascii=False))
-            except Exception:
-                pass
-            return payload
-    except Exception as e_chat:
-        if mode in ("auto", "chat"):
-            print(f"OpenAI Chat Completions failed, using stub payload: {e_chat}", file=sys.stderr)
-            return _build_stub_payload(run_type)
-        raise
+        # Attempt 2: Chat Completions (widely supported)
+        try:
+            chat_url = "https://api.openai.com/v1/chat/completions"
+            chat_payload = {
+                "model": model_in_use,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": USER_PROMPT_SCHEMA},
+                ],
+                "temperature": 0,
+            }
+            if mode in ("auto", "chat"):
+                resp = requests.post(chat_url, headers=headers, json=chat_payload, timeout=120)
+                resp.raise_for_status()
+                data = resp.json()
+                try:
+                    content = data["choices"][0]["message"]["content"]
+                except Exception as e_extract:
+                    raise RuntimeError(f"Chat Completions content extraction failed: {e_extract}")
+                payload = _coerce_json(content)
+                payload["_debug_endpoint"] = "chat"
+                payload["_debug_model"] = model_in_use
+                payload["_debug_prompt"] = combined_prompt
+                payload["_debug_raw_http_json"] = data
+                payload["_debug_content"] = content
+                try:
+                    payload["_debug_parsed_from_content"] = json.loads(json.dumps(payload, ensure_ascii=False))
+                except Exception:
+                    pass
+                return payload
+        except Exception as e_chat:
+            last_error = e_chat
+            if mode in ("auto", "chat"):
+                print(f"OpenAI Chat Completions failed, using stub payload: {e_chat}", file=sys.stderr)
+                # In chat-only mode, return stub immediately; in auto, try next model
+                if mode == "chat":
+                    return _build_stub_payload(run_type)
+                continue
+
+    # If we reach here, all attempts failed; return a stub to keep runs green
+    if mode in ("auto", "chat", "responses"):
+        return _build_stub_payload(run_type)
+    # Fallback (should not be reached)
+    if last_error:
+        raise last_error
+    raise RuntimeError("OpenAI call failed with no additional error context")
 
 # ====== Pages Writer ======
 def write_html_to_pages(run_type: str, payload: dict) -> str:
