@@ -3,6 +3,9 @@ import sys
 import json
 import smtplib
 import ssl
+import re
+from urllib.parse import urlsplit, urlunsplit, unquote, quote
+import html as html_lib
 from email.mime.text import MIMEText
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -19,12 +22,6 @@ EMAIL_FROM = os.environ.get("EMAIL_FROM", "").strip()
 EMAIL_TO = os.environ.get("EMAIL_TO", "").strip()
 GMAIL_USERNAME = os.environ.get("GMAIL_USERNAME", "").strip()
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "").strip()
-
-if len(sys.argv) < 2 or sys.argv[1] not in ("daily", "weekly"):
-    print("Usage: python scripts/generate_report.py [daily|weekly]")
-    sys.exit(1)
-
-RUN_TYPE = sys.argv[1]
 
 
 def _current_date_et() -> str:
@@ -76,6 +73,86 @@ USER_PROMPT_SCHEMA = (
     "- Always include URLs and explain why it matters to Deloitte’s Workday practice.\n"
     "- Use run_date in YYYY-MM-DD (ET).\n"
 )
+
+_ZERO_WIDTH_RE = re.compile(r"[\u200B\u200C\u200D\u2060\uFEFF]")
+
+
+def _normalize_href_value(raw_url: str) -> str:
+    """Return a sanitized, well-formed URL for use in href attributes.
+
+    - Trims whitespace and removes zero-width characters
+    - Fixes spaced or single-slash schemes like "https: //example.com" or "http:/example"
+    - Adds https:// when a domain starts with www. or looks like a bare domain
+    - Percent-encodes path/query/fragment as needed
+    - Leaves non-web schemes (mailto:, tel:, etc.) untouched aside from trimming
+    """
+    if not raw_url:
+        return raw_url
+
+    # Unescape any HTML entities, strip whitespace and invisible characters
+    url = html_lib.unescape(raw_url).strip()
+    url = _ZERO_WIDTH_RE.sub("", url)
+
+    # Early exit for common non-web schemes
+    lowered = url.lower()
+    if lowered.startswith(("mailto:", "tel:", "sms:", "slack:", "whatsapp:", "ftp:")):
+        return url
+    if url.startswith("#"):
+        return url
+
+    # Normalize spaced or partially malformed schemes like "https: //" or "http:/"
+    # 1) Collapse spaces around '://'
+    url = re.sub(r"^(https?)\s*:\s*//\s*", r"\1://", url, flags=re.IGNORECASE)
+    # 2) Fix single-slash scheme like "http:/example.com" (but avoid matching 'http://')
+    url = re.sub(r"^(https?)\s*:\s*/(?!/)", r"\1://", url, flags=re.IGNORECASE)
+
+    # Add https:// for www.* or bare domains
+    if url.lower().startswith("www."):
+        url = f"https://{url}"
+    elif re.match(r"^[A-Za-z0-9.-]+\.[A-Za-z]{2,}(/.*)?$", url):
+        url = f"https://{url}"
+
+    # Parse and re-encode components
+    try:
+        parts = urlsplit(url)
+        scheme = parts.scheme.lower() or "https"
+        # Clean up netloc: remove spaces and lowercase
+        netloc = parts.netloc.replace(" ", "").lower()
+
+        # Percent-encode path, query, fragment (avoid double-encoding by unquoting first)
+        path = quote(unquote(parts.path), safe="/@:+-._~!$&'()*+,;=")
+        query = quote(unquote(parts.query), safe="=&:@/?+-._~!$'()*+,;,")
+        fragment = quote(unquote(parts.fragment), safe="-._~!$&'()*+,;=:@/?")
+
+        normalized = urlunsplit((scheme, netloc, path, query, fragment))
+    except Exception:
+        # If parsing fails, fall back to trimmed input
+        normalized = url
+
+    return normalized
+
+
+def normalize_urls_in_html(html: str) -> str:
+    """Normalize all href attribute values inside the provided HTML string.
+
+    Also strips zero-width characters that can break URLs in some email clients.
+    """
+    if not html:
+        return html
+
+    cleaned_html = _ZERO_WIDTH_RE.sub("", html)
+
+    href_pattern = re.compile(r"href\s*=\s*(['\"])(.*?)\1", flags=re.IGNORECASE | re.DOTALL)
+
+    def _replace_href(match: re.Match) -> str:
+        quote_char = match.group(1)
+        raw_val = match.group(2)
+        normalized_val = _normalize_href_value(raw_val)
+        # Escape for HTML attribute context
+        escaped_val = html_lib.escape(normalized_val, quote=True)
+        return f"href={quote_char}{escaped_val}{quote_char}"
+
+    return href_pattern.sub(_replace_href, cleaned_html)
 
 def _build_stub_payload(run_type: str) -> Dict[str, Any]:
     """Produce a minimal valid payload when API is unavailable.
@@ -202,6 +279,7 @@ def call_openai(run_type: str) -> Dict[str, Any]:
 def write_html_to_pages(run_type: str, payload: dict) -> str:
     target = "docs/index.html" if run_type == "daily" else "docs/weekly.html"
     html = payload.get("html_body", "<h2>No content</h2>")
+    html = normalize_urls_in_html(html)
     wrapper = (
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -221,6 +299,7 @@ def send_email(payload: dict):
         return
     subject = f"{payload.get('type','daily')} Research – {payload.get('title','Workday HCM + AI')} – {payload.get('run_date','')}"
     body_html = payload.get("html_body", "<h2>No content</h2>")
+    body_html = normalize_urls_in_html(body_html)
     msg = MIMEText(body_html, "html", "utf-8")
     msg["Subject"] = subject
     msg["From"] = EMAIL_FROM
@@ -233,11 +312,17 @@ def send_email(payload: dict):
 
 
 def main():
-    payload = call_openai(RUN_TYPE)
-    payload.setdefault("type", RUN_TYPE)
+    # Determine run_type from argv
+    if len(sys.argv) < 2 or sys.argv[1] not in ("daily", "weekly"):
+        print("Usage: python scripts/generate_report.py [daily|weekly]")
+        sys.exit(1)
+    run_type = sys.argv[1]
+
+    payload = call_openai(run_type)
+    payload.setdefault("type", run_type)
     payload.setdefault("run_date", RUN_DATE)
     payload.setdefault("title", "Workday HCM + AI Brief")
-    target_file = write_html_to_pages(RUN_TYPE, payload)
+    target_file = write_html_to_pages(run_type, payload)
     print(f"Wrote: {target_file}")
     send_email(payload)
 
