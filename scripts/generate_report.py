@@ -7,7 +7,7 @@ import re
 from urllib.parse import urlsplit, urlunsplit, unquote, quote
 import html as html_lib
 from email.mime.text import MIMEText
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 try:
@@ -15,7 +15,10 @@ try:
 except Exception:  # pragma: no cover - fallback for older runtimes
     ZoneInfo = None  # type: ignore
 
-import requests
+try:
+    import requests  # type: ignore
+except Exception:  # pragma: no cover - optional dependency for local runs
+    requests = None  # type: ignore
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 EMAIL_FROM = os.environ.get("EMAIL_FROM", "").strip()
@@ -36,6 +39,22 @@ def _current_date_et() -> str:
 
 RUN_DATE = _current_date_et()
 
+
+def _weekly_window_for_anchor_date(anchor_date_str: str, lookback_days: int = 7) -> tuple[str, str]:
+    """Return (start_date_inclusive, end_date_inclusive) YYYY-MM-DD strings for a weekly window.
+
+    The window is anchored on the provided ET date string and looks back `lookback_days` inclusive.
+    For a 7-day window anchored on D, this returns (D-6, D).
+    """
+    try:
+        anchor_dt = datetime.fromisoformat(anchor_date_str)
+    except Exception:
+        # Fallback: if parsing fails for some reason, just use the anchor date for both
+        return anchor_date_str, anchor_date_str
+
+    start_dt = anchor_dt - timedelta(days=max(1, lookback_days) - 1)
+    return start_dt.strftime("%Y-%m-%d"), anchor_dt.strftime("%Y-%m-%d")
+
 SYSTEM_PROMPT_DAILY = (
     "You are Dan – Workday AI Research Agent. Produce a JSON object that matches the schema I'll give you exactly. "
     "Research: Workday, Workday HCM (Human Capital Management), Workday AI, agentic AI for Workday, broader AI for HR technology, "
@@ -51,7 +70,7 @@ SYSTEM_PROMPT_DAILY = (
     "  - All links must be absolute URLs (https://…).\n"
     "- The \"plain_text_body\" must be a text-only version with full URLs visible.\n\n"
     "Explain in each item why it matters to Deloitte's Workday practice (client conversations, offering strategy, enablement, competitive posture). "
-    "Today's date (ET) is now."
+    "Today's date in ET is {run_date}. Use this exact date as the run date."
 )
 
 SYSTEM_PROMPT_WEEKLY = (
@@ -69,7 +88,8 @@ SYSTEM_PROMPT_WEEKLY = (
     "  - All links must be absolute URLs (https://…).\n"
     "- The \"plain_text_body\" must be a text-only version with full URLs visible.\n\n"
     "Explain in each item why it matters to Deloitte's Workday practice (client conversations, offering strategy, enablement, competitive posture). "
-    "Today's date (ET) is now."
+    "Today in ET is {run_date}. Anchor on this date and analyze the past 7 days inclusive: "
+    "from {weekly_start_date} through {run_date}. Do not use a previous calendar week."
 )
 
 USER_PROMPT_SCHEMA = (
@@ -339,11 +359,19 @@ def _parse_json_from_model_text(content: str) -> Dict[str, Any]:
 
 
 def call_openai(run_type: str) -> Dict[str, Any]:
-    # If no key, return a stub so local runs don't fail
-    if not OPENAI_API_KEY:
+    # If no key or requests not available, return a stub so local runs don't fail
+    if not OPENAI_API_KEY or requests is None:
         return _build_stub_payload(run_type)
 
-    system_prompt = SYSTEM_PROMPT_DAILY if run_type == "daily" else SYSTEM_PROMPT_WEEKLY
+    # Build a system prompt with explicit dates to avoid the model inferring past dates.
+    if run_type == "daily":
+        system_prompt = SYSTEM_PROMPT_DAILY.format(run_date=RUN_DATE)
+    else:
+        weekly_start_date, weekly_end_date = _weekly_window_for_anchor_date(RUN_DATE)
+        system_prompt = SYSTEM_PROMPT_WEEKLY.format(
+            run_date=weekly_end_date,
+            weekly_start_date=weekly_start_date,
+        )
 
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -459,6 +487,13 @@ def main():
         print("Usage: python scripts/generate_report.py [daily|weekly]")
         sys.exit(1)
     run_type = sys.argv[1]
+
+    # Log the dates being passed for verification
+    if run_type == "daily":
+        print(f"[dates] type=daily run_date={RUN_DATE}")
+    else:
+        weekly_start_date, weekly_end_date = _weekly_window_for_anchor_date(RUN_DATE)
+        print(f"[dates] type=weekly run_date={weekly_end_date} window={weekly_start_date}..{weekly_end_date}")
 
     payload = call_openai(run_type)
     payload.setdefault("type", run_type)
