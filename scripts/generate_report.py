@@ -15,6 +15,8 @@ except Exception:  # pragma: no cover - environment without requests
 
 # ====== Secrets / Env ======
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+# Allow overriding model from environment; choose a broadly available default
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip()
 EMAIL_FROM = os.environ.get("EMAIL_FROM", "").strip()
 EMAIL_TO = os.environ.get("EMAIL_TO", "").strip()
 GMAIL_USERNAME = os.environ.get("GMAIL_USERNAME", "").strip()
@@ -161,6 +163,11 @@ def _build_stub_payload(run_type: str) -> dict:
 
 # ====== OpenAI Call ======
 def call_openai(run_type: str) -> dict:
+    """Call OpenAI using the Responses API, with fallback to Chat Completions.
+
+    If any API call fails or returns an unexpected payload, return a stub payload
+    so CI can continue (and Pages/email still get generated).
+    """
     if not OPENAI_API_KEY:
         return _build_stub_payload(run_type)
 
@@ -169,57 +176,113 @@ def call_openai(run_type: str) -> dict:
 
     system_prompt = SYSTEM_PROMPT_DAILY if run_type == "daily" else SYSTEM_PROMPT_WEEKLY
 
-    url = "https://api.openai.com/v1/responses"
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json",
     }
-    payload = {
-        "model": "gpt-5.1",
-        "response_format": {"type": "json_object"},
-        "input": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": USER_PROMPT_SCHEMA},
-        ],
-    }
-    resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=120)
-    resp.raise_for_status()
-    data = resp.json()
 
-    # Responses API normalization: support both "output" and "choices" shapes
-    content = None
-    if isinstance(data, dict) and "output" in data:
-        output_val = data["output"]
-        if isinstance(output_val, str):
-            content = output_val
-        elif isinstance(output_val, list) and output_val:
-            for item in output_val:
-                if isinstance(item, str):
-                    content = item
-                    break
-                if isinstance(item, dict) and "content" in item:
-                    content = item["content"]
-                    break
-    if not content and "choices" in data:
+    def _extract_text_from_responses_api_payload(data: dict) -> str | None:
+        # Prefer canonical aggregated field if present
+        if isinstance(data, dict):
+            output_text = data.get("output_text")
+            if isinstance(output_text, str) and output_text.strip():
+                return output_text
+
+            if "output" in data:
+                output_val = data["output"]
+                if isinstance(output_val, str) and output_val.strip():
+                    return output_val
+                if isinstance(output_val, list) and output_val:
+                    for item in output_val:
+                        if isinstance(item, str) and item.strip():
+                            return item
+                        if isinstance(item, dict):
+                            # Common shapes include {"type":"output_text","content":"..."}
+                            text_candidate = item.get("content") or item.get("text")
+                            if isinstance(text_candidate, str) and text_candidate.strip():
+                                return text_candidate
+
+            # Some deployments proxy Responses to Chat Completions-like shape
+            try:
+                return data["choices"][0]["message"]["content"]
+            except Exception:
+                pass
+        return None
+
+    def _coerce_json(content: str) -> dict:
+        # First, try direct JSON
         try:
-            content = data["choices"][0]["message"]["content"]
-        except Exception:
+            return json.loads(content)
+        except json.JSONDecodeError:
             pass
 
-    if not content:
-        raise RuntimeError("OpenAI response did not include content in an expected format")
+        # Strip typical triple-backtick code fences, possibly with language hints
+        text = content.strip()
+        if text.startswith("```"):
+            # Remove first line (``` or ```json) and trailing fence if present
+            lines = text.split("\n")
+            lines = lines[1:] if len(lines) > 1 else []
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                pass
 
-    # Ensure content is pure JSON (strip code fences if any)
+        # Last resort: attempt to locate the first top-level JSON object
+        # This is a conservative approach and avoids complex parsing.
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            candidate = text[start : end + 1]
+            return json.loads(candidate)
+
+        # If all else fails, propagate the error upward
+        raise json.JSONDecodeError("Failed to parse JSON from model output", content, 0)
+
+    # Attempt 1: Responses API with string input (portable shape)
     try:
-        result = json.loads(content)
-    except json.JSONDecodeError:
-        content_stripped = content.strip()
-        if content_stripped.startswith("```"):
-            content_stripped = content_stripped.strip("`")
-            content_stripped = content_stripped.split("\n", 1)[-1]
-        result = json.loads(content_stripped)
+        responses_url = "https://api.openai.com/v1/responses"
+        responses_payload = {
+            "model": OPENAI_MODEL or "gpt-4o-mini",
+            "response_format": {"type": "json_object"},
+            # The Responses API expects a string (or tool/content blocks). Use a single string.
+            "input": f"{system_prompt}\n\n{USER_PROMPT_SCHEMA}",
+        }
+        resp = requests.post(responses_url, headers=headers, json=responses_payload, timeout=120)
+        resp.raise_for_status()
+        data = resp.json()
+        content = _extract_text_from_responses_api_payload(data)
+        if not content:
+            raise RuntimeError("Responses API did not include content in an expected format")
+        return _coerce_json(content)
+    except Exception as e_responses:
+        # Continue to Chat Completions fallback
+        print(f"Responses API failed, falling back to Chat Completions: {e_responses}", file=sys.stderr)
 
-    return result
+    # Attempt 2: Chat Completions (widely supported)
+    try:
+        chat_url = "https://api.openai.com/v1/chat/completions"
+        chat_payload = {
+            "model": OPENAI_MODEL or "gpt-4o-mini",
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": USER_PROMPT_SCHEMA},
+            ],
+        }
+        resp = requests.post(chat_url, headers=headers, json=chat_payload, timeout=120)
+        resp.raise_for_status()
+        data = resp.json()
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except Exception as e_extract:
+            raise RuntimeError(f"Chat Completions content extraction failed: {e_extract}")
+        return _coerce_json(content)
+    except Exception as e_chat:
+        print(f"OpenAI Chat Completions failed, using stub payload: {e_chat}", file=sys.stderr)
+        return _build_stub_payload(run_type)
 
 # ====== Pages Writer ======
 def write_html_to_pages(run_type: str, payload: dict) -> str:
