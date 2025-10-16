@@ -322,7 +322,12 @@ def _rewrite_links_in_html(html_markup: str) -> str:
     if PRESERVE_MODEL_HTML:
         return html_markup
 
-    a_tag_pattern = re.compile(r"<a\s+([^>]*?)href=([\'\"])(.*?)(?:\2)([^>]*)>", re.IGNORECASE)
+    # Permit optional whitespace around the equals sign so tags like
+    # <a href = "..."> are matched (models occasionally emit this style).
+    a_tag_pattern = re.compile(
+        r"<a\s+([^>]*?)href\s*=\s*([\'\"])(.*?)(?:\2)([^>]*)>",
+        re.IGNORECASE,
+    )
 
     def _replacer(match: re.Match) -> str:
         pre_attrs = match.group(1) or ""
