@@ -76,6 +76,29 @@ USER_PROMPT_SCHEMA = (
 
 _ZERO_WIDTH_RE = re.compile(r"[\u200B\u200C\u200D\u2060\uFEFF]")
 
+# Map common smart/curly quotes to ASCII quotes. Many sources introduce these,
+# which can break HTML attribute parsing in browsers and email clients.
+_SMART_TO_ASCII_MAP = str.maketrans({
+    "\u201C": '"',  # left double quote
+    "\u201D": '"',  # right double quote
+    "\u201E": '"',  # low double quote
+    "\u201F": '"',  # double high-reversed-9 quotation mark
+    "\u275D": '"',  # heavy double turned comma quotation mark ornament
+    "\u275E": '"',  # heavy double comma quotation mark ornament
+    "\uFF02": '"',  # fullwidth quotation mark
+    "\u2018": "'",  # left single quote
+    "\u2019": "'",  # right single quote / apostrophe
+    "\u201B": "'",  # single high-reversed-9 quotation mark
+    "\u2032": "'",  # prime
+    "\uFF07": "'",  # fullwidth apostrophe
+})
+
+def _normalize_smart_quotes(text: str) -> str:
+    """Replace smart/curly quotes with ASCII quotes in text."""
+    if not text:
+        return text
+    return html_lib.unescape(text).translate(_SMART_TO_ASCII_MAP)
+
 
 def _normalize_href_value(raw_url: str) -> str:
     """Return a sanitized, well-formed URL for use in href attributes.
@@ -135,24 +158,101 @@ def _normalize_href_value(raw_url: str) -> str:
 def normalize_urls_in_html(html: str) -> str:
     """Normalize all href attribute values inside the provided HTML string.
 
-    Also strips zero-width characters that can break URLs in some email clients.
+    Behaviors:
+    - Converts smart quotes to ASCII quotes
+    - Strips zero-width characters that can break URLs
+    - Fixes/canonicalizes values of href attributes, even if unquoted
     """
     if not html:
         return html
 
-    cleaned_html = _ZERO_WIDTH_RE.sub("", html)
+    cleaned_html = _normalize_smart_quotes(html)
+    cleaned_html = _ZERO_WIDTH_RE.sub("", cleaned_html)
 
-    href_pattern = re.compile(r"href\s*=\s*(['\"])(.*?)\1", flags=re.IGNORECASE | re.DOTALL)
+    # 1) Handle quoted href values first
+    quoted_pattern = re.compile(r"href\s*=\s*(['\"])\s*(.*?)\1", flags=re.IGNORECASE | re.DOTALL)
 
-    def _replace_href(match: re.Match) -> str:
+    def _replace_quoted(match: re.Match) -> str:
         quote_char = match.group(1)
         raw_val = match.group(2)
         normalized_val = _normalize_href_value(raw_val)
-        # Escape for HTML attribute context
         escaped_val = html_lib.escape(normalized_val, quote=True)
         return f"href={quote_char}{escaped_val}{quote_char}"
 
-    return href_pattern.sub(_replace_href, cleaned_html)
+    cleaned_html = quoted_pattern.sub(_replace_quoted, cleaned_html)
+
+    # 2) Handle unquoted href values: href=value (stop at whitespace or >)
+    unquoted_pattern = re.compile(r"href\s*=\s*([^\s>'\"]+)", flags=re.IGNORECASE)
+
+    def _replace_unquoted(match: re.Match) -> str:
+        raw_val = match.group(1)
+        normalized_val = _normalize_href_value(raw_val)
+        escaped_val = html_lib.escape(normalized_val, quote=True)
+        return f"href=\"{escaped_val}\""
+
+    cleaned_html = unquoted_pattern.sub(_replace_unquoted, cleaned_html)
+
+    return cleaned_html
+
+
+def _convert_markdown_links_to_anchors(html: str) -> str:
+    """Convert Markdown links [text](url) to <a href="url">text</a> in non-tag text."""
+    if not html:
+        return html
+    parts = re.split(r"(<[^>]+>)", html)
+    out_parts: List[str] = []
+    md_link_re = re.compile(r"\[([^\]]+)\]\(([^\s)]+)\)")
+
+    for part in parts:
+        if part.startswith("<") and part.endswith(">"):
+            out_parts.append(part)
+            continue
+
+        def _md_sub(m: re.Match) -> str:
+            text = html_lib.escape(m.group(1))
+            url = _normalize_href_value(m.group(2))
+            url_escaped = html_lib.escape(url, quote=True)
+            return f"<a href=\"{url_escaped}\">{text}</a>"
+
+        out_parts.append(md_link_re.sub(_md_sub, part))
+
+    return "".join(out_parts)
+
+
+def _autolink_plain_urls(html: str) -> str:
+    """Auto-link plain URLs in non-tag text segments."""
+    if not html:
+        return html
+    parts = re.split(r"(<[^>]+>)", html)
+    out_parts: List[str] = []
+    url_re = re.compile(r"(?:(?:https?://)|(?:www\.))[^\s<>'\"]+")
+
+    for part in parts:
+        if part.startswith("<") and part.endswith(">"):
+            out_parts.append(part)
+            continue
+
+        def _url_sub(m: re.Match) -> str:
+            raw = m.group(0)
+            url = _normalize_href_value(raw)
+            url_escaped = html_lib.escape(url, quote=True)
+            display = html_lib.escape(raw)
+            return f"<a href=\"{url_escaped}\">{display}</a>"
+
+        out_parts.append(url_re.sub(_url_sub, part))
+
+    return "".join(out_parts)
+
+
+def prepare_html(html: str) -> str:
+    """Prepare HTML for pages and email: fix quotes, linkify, normalize."""
+    if not html:
+        return html
+    step1 = _normalize_smart_quotes(html)
+    step2 = _convert_markdown_links_to_anchors(step1)
+    step3 = _autolink_plain_urls(step2)
+    return normalize_urls_in_html(step3)
+
 
 def _build_stub_payload(run_type: str) -> Dict[str, Any]:
     """Produce a minimal valid payload when API is unavailable.
@@ -276,10 +376,11 @@ def call_openai(run_type: str) -> Dict[str, Any]:
         # Final fallback: local stub.
         return _build_stub_payload(run_type)
 
+
 def write_html_to_pages(run_type: str, payload: dict) -> str:
     target = "docs/index.html" if run_type == "daily" else "docs/weekly.html"
     html = payload.get("html_body", "<h2>No content</h2>")
-    html = normalize_urls_in_html(html)
+    html = prepare_html(html)
     wrapper = (
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -293,13 +394,14 @@ def write_html_to_pages(run_type: str, payload: dict) -> str:
         f.write(html_page)
     return target
 
+
 def send_email(payload: dict):
     if not (EMAIL_FROM and EMAIL_TO and GMAIL_USERNAME and GMAIL_APP_PASSWORD):
         print("Email secrets missing; skipping email send.")
         return
     subject = f"{payload.get('type','daily')} Research – {payload.get('title','Workday HCM + AI')} – {payload.get('run_date','')}"
     body_html = payload.get("html_body", "<h2>No content</h2>")
-    body_html = normalize_urls_in_html(body_html)
+    body_html = prepare_html(body_html)
     msg = MIMEText(body_html, "html", "utf-8")
     msg["Subject"] = subject
     msg["From"] = EMAIL_FROM
