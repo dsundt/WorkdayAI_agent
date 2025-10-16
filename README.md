@@ -21,6 +21,12 @@ This repo publishes daily and weekly Workday/AI briefs to `/docs` (served by Git
 4. **Manual run:**  
    Actions → select workflow → Run workflow → choose branch.
 
+## Model
+
+- Default model is `gpt-5` (override with env `OPENAI_MODEL`).
+- Responses and Chat Completions calls set `response_format={type: json_object}` and `temperature=0` to maximize determinism.
+- Set `PRESERVE_MODEL_HTML=1` (default) to render the model's `html_body` exactly. Set to `0` to enable link rewriting/normalization.
+
 ## Outputs
 
 - Daily page: `/docs/index.html`  
@@ -31,3 +37,23 @@ This repo publishes daily and weekly Workday/AI briefs to `/docs` (served by Git
 - To accommodate DST shifts, adjust cron or run hourly and gate inside Python.
 - Mail uses Gmail SMTP via app password.
 - Only `requests` is installed; everything else is stdlib.
+
+## Verify that app output matches ChatGPT JSON
+
+You can run a local verification that captures the raw JSON returned by OpenAI and compares it to what the site and email would show.
+
+```bash
+# Verify daily (uses OPENAI_API_KEY if set; otherwise runs stub):
+python3 scripts/generate_report.py verify daily
+
+# Outputs go to docs/debug/ with filenames like:
+#  - daily-YYYY-MM-DD-raw-http.json      (Responses API raw HTTP JSON)
+#  - daily-YYYY-MM-DD-payload.json       (parsed payload as used by the app)
+#  - daily-YYYY-MM-DD-verify.json        (verification report)
+#  - daily-YYYY-MM-DD-chat-raw-http.json (Chat Completions raw JSON)
+#  - daily-YYYY-MM-DD-chat-payload.json  (Chat Completions parsed)
+```
+
+The verification report ensures:
+- `html_body` is preserved in Pages and email when `PRESERVE_MODEL_HTML=1`.
+- `run_date` and `type` from the model are not overridden (they are only set if missing).
