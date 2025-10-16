@@ -3,9 +3,12 @@ import sys
 import json
 import smtplib
 import ssl
+import re
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo  # stdlib timezone support (Py 3.9+)
+from urllib.parse import urlsplit, urlunsplit, quote, unquote
+import html as html_lib
 
 # requests is optional at runtime; tests run without network/API.
 try:
@@ -15,8 +18,8 @@ except Exception:  # pragma: no cover - environment without requests
 
 # ====== Secrets / Env ======
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
-# Allow overriding model from environment; choose a broadly available default
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip()
+# Allow overriding model from environment; choose a strong default for best results
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o").strip()
 EMAIL_FROM = os.environ.get("EMAIL_FROM", "").strip()
 EMAIL_TO = os.environ.get("EMAIL_TO", "").strip()
 GMAIL_USERNAME = os.environ.get("GMAIL_USERNAME", "").strip()
@@ -161,6 +164,105 @@ def _build_stub_payload(run_type: str) -> dict:
     }
 
 
+def _percent_encode_url(url: str) -> str:
+    """Percent-encode unsafe characters in URL components without double-encoding.
+
+    Leaves common safe/reserved characters intact.
+    """
+    try:
+        parsed = urlsplit(url)
+        path = quote(unquote(parsed.path), safe="/:@-._~!$&'()*+,;=")
+        query = quote(unquote(parsed.query), safe="=&:@-._~!$'()*+,;")
+        fragment = quote(unquote(parsed.fragment), safe=":@-._~!$&'()*+,;=")
+        return urlunsplit((parsed.scheme, parsed.netloc, path, query, fragment))
+    except Exception:
+        return url
+
+
+def _normalize_href(raw_val: str) -> str:
+    """Normalize href values to reduce 404s and ensure absolute, launchable links.
+
+    - Decode HTML entities
+    - Strip smart quotes and trailing punctuation
+    - Add schemes for // and www.* URLs
+    - Fix common malformed scheme variants (https:/, http:/)
+    - Percent-encode spaces and other unsafe characters
+    - For domain-only or relative paths, best-effort to make absolute; otherwise fallback to '#'
+    """
+    if raw_val is None:
+        return "#"
+
+    s = html_lib.unescape(raw_val.strip())
+
+    # Trim surrounding smart quotes/backticks
+    s = s.strip('“”‘’"`')
+
+    # Remove trailing punctuation commonly attached in prose
+    while s and s[-1] in ",.);]»\"’”":
+        s = s[:-1]
+
+    # Normalize scheme variants and schemeless URLs
+    if s.startswith("//"):
+        s = "https:" + s
+    elif s.startswith("www."):
+        s = "https://" + s
+    elif s.startswith("https:/") and not s.startswith("https://"):
+        s = "https://" + s[len("https:/"):]
+    elif s.startswith("http:/") and not s.startswith("http://"):
+        s = "http://" + s[len("http:/"):]
+
+    # If it's clearly a domain without scheme, prefix https
+    if re.match(r"^[A-Za-z0-9.-]+\.[A-Za-z]{2,}(/.*)?$", s) and not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", s):
+        s = "https://" + s
+
+    # Allow anchors and mail/tel as-is
+    if s.startswith(("http://", "https://", "mailto:", "tel:", "#")):
+        return _percent_encode_url(s)
+
+    # Leading slash without domain: no reliable base; fall back to anchor
+    if s.startswith("/"):
+        return "#"
+
+    # Anything else that lacks a scheme: convert to anchor to avoid broken external navigation
+    return "#"
+
+
+def _rewrite_links_in_html(html_markup: str) -> str:
+    """Rewrite <a href> links to be absolute, safely quoted, and launchable.
+
+    - Ensures href is double-quoted
+    - Adds target="_blank" and rel="noopener noreferrer" for external links
+    - Leaves mailto/tel/# intact, but still properly quoted
+    """
+    if not html_markup:
+        return html_markup
+
+    a_tag_pattern = re.compile(r"<a\s+([^>]*?)href=([\'\"])(.*?)(?:\2)([^>]*)>", re.IGNORECASE)
+
+    def _replacer(match: re.Match) -> str:
+        pre_attrs = match.group(1) or ""
+        quote_ch = '"'  # standardize
+        href_val = match.group(3) or ""
+        post_attrs = match.group(4) or ""
+
+        normalized = _normalize_href(href_val)
+
+        attrs_combined = (pre_attrs + " " + post_attrs).strip()
+        # Ensure target and rel are present for http(s) links
+        is_external = normalized.startswith(("http://", "https://"))
+        if is_external and "target=" not in attrs_combined:
+            post_attrs = (post_attrs + " target=\"_blank\"").strip()
+        if is_external and "rel=" not in attrs_combined:
+            post_attrs = (post_attrs + " rel=\"noopener noreferrer\"").strip()
+
+        # Normalize spacing around attributes
+        pre_attrs_norm = (pre_attrs.strip() + " ") if pre_attrs.strip() else ""
+        post_attrs_norm = (" " + post_attrs.strip()) if post_attrs.strip() else ""
+        return f"<a {pre_attrs_norm}href=\"{normalized}\"{post_attrs_norm}>"
+
+    return a_tag_pattern.sub(_replacer, html_markup)
+
+
 # ====== OpenAI Call ======
 def call_openai(run_type: str) -> dict:
     """Call OpenAI using the Responses API, with fallback to Chat Completions.
@@ -168,13 +270,20 @@ def call_openai(run_type: str) -> dict:
     If any API call fails or returns an unexpected payload, return a stub payload
     so CI can continue (and Pages/email still get generated).
     """
+    # Compute prompt data up-front so we can expose it in HTML for debugging
+    system_prompt = SYSTEM_PROMPT_DAILY if run_type == "daily" else SYSTEM_PROMPT_WEEKLY
+    combined_prompt = f"{system_prompt}\n\n{USER_PROMPT_SCHEMA}"
+    model_in_use = (OPENAI_MODEL or "gpt-4o").strip()
+
     if not OPENAI_API_KEY:
-        return _build_stub_payload(run_type)
+        payload = _build_stub_payload(run_type)
+        payload["_debug_endpoint"] = "stub"
+        payload["_debug_model"] = model_in_use
+        payload["_debug_prompt"] = combined_prompt
+        return payload
 
     if requests is None:
         raise RuntimeError("The 'requests' package is required when OPENAI_API_KEY is set")
-
-    system_prompt = SYSTEM_PROMPT_DAILY if run_type == "daily" else SYSTEM_PROMPT_WEEKLY
 
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -245,10 +354,10 @@ def call_openai(run_type: str) -> dict:
     try:
         responses_url = "https://api.openai.com/v1/responses"
         responses_payload = {
-            "model": OPENAI_MODEL or "gpt-4o-mini",
+            "model": model_in_use,
             "response_format": {"type": "json_object"},
             # The Responses API expects a string (or tool/content blocks). Use a single string.
-            "input": f"{system_prompt}\n\n{USER_PROMPT_SCHEMA}",
+            "input": combined_prompt,
         }
         resp = requests.post(responses_url, headers=headers, json=responses_payload, timeout=120)
         resp.raise_for_status()
@@ -256,7 +365,11 @@ def call_openai(run_type: str) -> dict:
         content = _extract_text_from_responses_api_payload(data)
         if not content:
             raise RuntimeError("Responses API did not include content in an expected format")
-        return _coerce_json(content)
+        payload = _coerce_json(content)
+        payload["_debug_endpoint"] = "responses"
+        payload["_debug_model"] = model_in_use
+        payload["_debug_prompt"] = combined_prompt
+        return payload
     except Exception as e_responses:
         # Continue to Chat Completions fallback
         print(f"Responses API failed, falling back to Chat Completions: {e_responses}", file=sys.stderr)
@@ -265,7 +378,7 @@ def call_openai(run_type: str) -> dict:
     try:
         chat_url = "https://api.openai.com/v1/chat/completions"
         chat_payload = {
-            "model": OPENAI_MODEL or "gpt-4o-mini",
+            "model": model_in_use,
             "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -279,7 +392,11 @@ def call_openai(run_type: str) -> dict:
             content = data["choices"][0]["message"]["content"]
         except Exception as e_extract:
             raise RuntimeError(f"Chat Completions content extraction failed: {e_extract}")
-        return _coerce_json(content)
+        payload = _coerce_json(content)
+        payload["_debug_endpoint"] = "chat"
+        payload["_debug_model"] = model_in_use
+        payload["_debug_prompt"] = combined_prompt
+        return payload
     except Exception as e_chat:
         print(f"OpenAI Chat Completions failed, using stub payload: {e_chat}", file=sys.stderr)
         return _build_stub_payload(run_type)
@@ -288,6 +405,23 @@ def call_openai(run_type: str) -> dict:
 def write_html_to_pages(run_type: str, payload: dict) -> str:
     target = "docs/index.html" if run_type == "daily" else "docs/weekly.html"
     html = payload.get("html_body", "<h2>No content</h2>")
+    # Rewrite and normalize links to reduce broken URLs
+    html = _rewrite_links_in_html(html)
+
+    # Append debug block showing the exact prompt sent to OpenAI
+    debug_endpoint = payload.get("_debug_endpoint", "n/a")
+    debug_model = payload.get("_debug_model", "n/a")
+    debug_prompt = payload.get("_debug_prompt", "")
+    if debug_prompt:
+        escaped_prompt = html_lib.escape(debug_prompt)
+        debug_html = (
+            "<hr>"
+            "<h3>Prompt sent to OpenAI</h3>"
+            f"<p><strong>Endpoint:</strong> {html_lib.escape(str(debug_endpoint))} &nbsp; "
+            f"<strong>Model:</strong> {html_lib.escape(str(debug_model))}</p>"
+            f"<pre style=\"white-space:pre-wrap;overflow-x:auto;border:1px solid #ddd;padding:12px;border-radius:6px;background:#fafafa\">{escaped_prompt}</pre>"
+        )
+        html = html + debug_html
     wrapper = (
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"

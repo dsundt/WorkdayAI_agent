@@ -27,6 +27,9 @@ def test_daily_generates_index_html():
         assert not any(ch in val for ch in ["\u201C", "\u201D", "\u2018", "\u2019"])  # no smart quotes
         assert val.startswith(("http://", "https://", "mailto:", "tel:", "#"))
 
+    # Ensure debug block is present with the prompt
+    assert "Prompt sent to OpenAI" in content
+
 
 def test_weekly_generates_weekly_html():
     code, out, err = run_cmd(["python3", str(SCRIPT), "weekly"])  # uses stub if no OPENAI_API_KEY
@@ -40,3 +43,6 @@ def test_weekly_generates_weekly_html():
     for _q, val in hrefs:
         assert not any(ch in val for ch in ["\u201C", "\u201D", "\u2018", "\u2019"])  # no smart quotes
         assert val.startswith(("http://", "https://", "mailto:", "tel:", "#"))
+
+    # Ensure debug block is present with the prompt
+    assert "Prompt sent to OpenAI" in content
