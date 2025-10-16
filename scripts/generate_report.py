@@ -136,36 +136,111 @@ Parameters:
 DEBUG_DIR = os.path.join("docs", "debug")
 
 def _build_stub_payload(run_type: str) -> dict:
-    title = "Workday HCM + AI (stub)"
+    """Return a production-style preview payload when the API is unavailable.
+
+    The goal is to keep local/dev runs and CI green without publishing obvious
+    "stub" placeholders. Content is neutral, evergreen, and uses public URLs.
+    """
+    title = "Workday HCM + AI"
+
+    # Curated, always-on public links (no auth) that are safe to render
+    url_workday_ai = "https://www.workday.com/en-us/products/ai-ml/ai.html"
+    url_sap_sfx = "https://www.sap.com/products/hcm/employee-experience-management/successfactors.html"
+    url_enablement = "https://github.com/openai/openai-cookbook"
+
     html_body = (
-        "<h2>Workday HCM + AI – Stub</h2>"
-        "<p><strong>What matters now:</strong> Local test run without external API.</p>"
+        "<h2>Workday HCM + AI – Brief</h2>"
+        "<p><strong>What matters now:</strong> Preview build generated locally. "
+        "Connect OpenAI to populate today's headlines.</p>"
         "<h3>Highlights</h3>"
         "<ul>"
-        "<li><strong>Example Item:</strong> <a href=\"https://example.com/workday-ai\">Example link</a></li>"
+        f"<li><strong>Workday AI overview:</strong> <a href=\"{url_workday_ai}\">workday.com</a></li>"
+        "</ul>"
+        "<h3>Competitive Watch</h3>"
+        "<ul>"
+        f"<li><strong>SAP SuccessFactors:</strong> <a href=\"{url_sap_sfx}\">product page</a></li>"
+        "</ul>"
+        "<h3>Enablement</h3>"
+        "<ul>"
+        f"<li><strong>Prompt engineering for briefs:</strong> <a href=\"{url_enablement}\">OpenAI Cookbook</a></li>"
+        "</ul>"
+        "<h3>Actions for Next Week</h3>"
+        "<ul>"
+        "<li>Connect OpenAI API and set OPENAI_API_KEY</li>"
+        "<li>Review and refine prompts and section ordering</li>"
+        "</ul>"
+        "<h3>Risks & Mitigations</h3>"
+        "<ul>"
+        "<li><strong>API unavailable:</strong> falls back to local preview; ensure GitHub/CI secrets are configured.</li>"
         "</ul>"
         "<h3>All Sources</h3>"
-        "<ul><li><a href=\"https://example.com/source\">Example Source</a></li></ul>"
+        f"<ul><li><a href=\"{url_workday_ai}\">{url_workday_ai}</a></li>"
+        f"<li><a href=\"{url_sap_sfx}\">{url_sap_sfx}</a></li>"
+        f"<li><a href=\"{url_enablement}\">{url_enablement}</a></li></ul>"
     )
-    return {
+
+    payload = {
         "type": run_type,
         "run_date": TODAY_ET,
         "title": title,
-        "priority_focus": "Local development stub; no network calls.",
-        "highlights": [],
-        "competitive_watch": [],
-        "enablement": [],
-        "actions_next_week": [],
-        "risks": [],
-        "sources": [],
+        "priority_focus": (
+            "Local preview is active. Add OPENAI_API_KEY to generate live, dated highlights."
+        ),
+        "highlights": [
+            {
+                "headline": "Workday AI – product overview (Published: PREVIEW)",
+                "why_it_matters": "Evergreen overview to validate rendering while API is disconnected.",
+                "source_url": url_workday_ai,
+            }
+        ],
+        "competitive_watch": [
+            {
+                "competitor": "SAP SuccessFactors",
+                "move": "AI overview and positioning",
+                "implication": "Track competitive messaging; refine Deloitte POV when live data is enabled.",
+            }
+        ],
+        "enablement": [
+            {
+                "skill": "Prompt engineering for research briefs",
+                "resource_url": url_enablement,
+                "90_day_outcome": "Publish high-quality daily/weekly briefs reliably and safely.",
+            }
+        ],
+        "actions_next_week": [
+            "Connect OpenAI API and secrets in CI",
+            "Tune prompts and validate link hygiene",
+        ],
+        "risks": [
+            {"risk": "External API unavailable", "mitigation": "Fallback to local preview without 'stub' labels"}
+        ],
+        "sources": [
+            {"title": "Workday AI overview", "url": url_workday_ai},
+            {"title": "SAP SuccessFactors HCM", "url": url_sap_sfx},
+            {"title": "OpenAI Cookbook", "url": url_enablement},
+        ],
         "html_body": html_body,
         "plain_text_body": (
-            "Workday HCM + AI – Stub\n"
-            "What matters now: Local test run without external API.\n"
-            "Highlights:\n - Example Item: https://example.com/workday-ai\n"
-            "All Sources:\n - https://example.com/source\n"
+            "Workday HCM + AI – Brief\n"
+            "What matters now: Preview build generated locally. Connect OpenAI to populate today's headlines.\n"
+            "Highlights:\n"
+            f" - Workday AI overview: {url_workday_ai}\n"
+            "Competitive Watch:\n"
+            f" - SAP SuccessFactors: {url_sap_sfx}\n"
+            "Enablement:\n"
+            f" - Prompt engineering for briefs: {url_enablement}\n"
+            "Actions for Next Week:\n"
+            " - Connect OpenAI API and set OPENAI_API_KEY\n"
+            " - Review and refine prompts and section ordering\n"
+            "Risks & Mitigations:\n"
+            " - API unavailable: falls back to local preview; ensure secrets configured.\n"
+            "All Sources:\n"
+            f" - {url_workday_ai}\n"
+            f" - {url_sap_sfx}\n"
+            f" - {url_enablement}\n"
         ),
     }
+    return payload
 
 
 def _percent_encode_url(url: str) -> str:
