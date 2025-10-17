@@ -607,6 +607,11 @@ def _rewrite_links_in_html(html_markup: str) -> str:
     if PRESERVE_MODEL_HTML:
         return html_markup
 
+    # Opportunistically convert plain URLs/markdown to anchors when the model
+    # returned text without proper <a> tags. This reduces broken links when the
+    # model violates the prompt and emits non-HTML links.
+    html_markup = _autolink_plain_urls_and_markdown(html_markup)
+
     # Permit optional whitespace around the equals sign so tags like
     # <a href = "..."> are matched (models occasionally emit this style).
     # Support both quoted and unquoted href values. Standardize to double quotes.
@@ -638,6 +643,185 @@ def _rewrite_links_in_html(html_markup: str) -> str:
         return f"<a {pre_attrs_norm}href=\"{normalized}\"{post_attrs_norm}>"
 
     return a_tag_pattern.sub(_replacer, html_markup)
+
+
+def _autolink_plain_urls_and_markdown(html_markup: str) -> str:
+    """Convert common non-HTML link syntaxes to anchors when <a> tags are absent.
+
+    - Converts markdown [text](https://...) to <a href="...">text</a>
+    - Converts bare https://... URLs to anchors
+    - Converts <https://...> or &lt;https://...&gt; to anchors
+
+    This function is intentionally conservative: it only activates when there
+    are no <a ...> tags present to avoid double-wrapping or interfering with
+    already well-formed HTML.
+    """
+    try:
+        if not html_markup:
+            return html_markup
+        lower = html_markup.lower()
+        if "<a " in lower:
+            return html_markup
+
+        text = html_markup
+
+        # 1) Markdown links: [label](https://example.com/path)
+        md_pattern = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
+        def _md_repl(m: re.Match) -> str:
+            label = html_lib.escape(m.group(1))
+            url = _normalize_href(m.group(2))
+            return f'<a href="{url}">{label}</a>'
+        text = md_pattern.sub(_md_repl, text)
+
+        # 2) Angle-bracket links: <https://example.com> or &lt;https://...&gt;
+        angle_pattern = re.compile(r"(?:<|&lt;)(https?://[^\s<>]+)(?:>|&gt;)", re.IGNORECASE)
+        def _angle_repl(m: re.Match) -> str:
+            url = m.group(1)
+            norm = _normalize_href(url)
+            return f'<a href="{norm}">{url}</a>'
+        text = angle_pattern.sub(_angle_repl, text)
+
+        # 3) Bare URLs in text nodes: wrap with anchors; keep preceding delimiter
+        bare_url_pattern = re.compile(r'(^|[\s\(\[])(https?://[^\s<>()\"]+)', re.IGNORECASE)
+        def _bare_repl(m: re.Match) -> str:
+            prefix = m.group(1) or ''
+            url = m.group(2)
+            norm = _normalize_href(url)
+            return prefix + f'<a href="{norm}">{url}</a>'
+        text = bare_url_pattern.sub(_bare_repl, text)
+
+        return text
+    except Exception:
+        # Fail open; if anything goes wrong, return original markup
+        return html_markup
+
+
+def _render_html_from_structured(payload: dict) -> str:
+    """Render a minimal HTML body from structured fields as a fallback.
+
+    Used when the model's html_body is missing/invalid. Keeps ordering stable:
+    Highlights; Competitive Watch; Enablement; Actions; Risks; All Sources.
+    """
+    title = html_lib.escape(payload.get("title", "Workday HCM + AI – Brief") or "Workday HCM + AI – Brief")
+    priority_focus = html_lib.escape(payload.get("priority_focus", "") or "")
+
+    def _li(content: str) -> str:
+        return f"<li>{content}</li>"
+
+    # Highlights
+    highlights_html = ""
+    highlights = payload.get("highlights") or []
+    if isinstance(highlights, list) and highlights:
+        items: list[str] = []
+        for item in highlights:
+            if not isinstance(item, dict):
+                continue
+            headline = html_lib.escape(item.get("headline", "") or "")
+            why = html_lib.escape(item.get("why_it_matters", "") or "")
+            url = _normalize_href(str(item.get("source_url", "") or ""))
+            link = f'<a href="{url}">{headline or url}</a>' if url else headline
+            text = f"<strong>{link}</strong>"
+            if why:
+                text += f": {why}"
+            items.append(_li(text))
+        if items:
+            highlights_html = "<h3>Highlights</h3><ul>" + "".join(items) + "</ul>"
+
+    # Competitive Watch
+    comp_html = ""
+    comp = payload.get("competitive_watch") or []
+    if isinstance(comp, list) and comp:
+        items = []
+        for c in comp:
+            if not isinstance(c, dict):
+                continue
+            competitor = html_lib.escape(c.get("competitor", "") or "")
+            move = html_lib.escape(c.get("move", "") or "")
+            implication = html_lib.escape(c.get("implication", "") or "")
+            txt = f"<strong>{competitor}</strong>: {move}"
+            if implication:
+                txt += f" – {implication}"
+            items.append(_li(txt))
+        if items:
+            comp_html = "<h3>Competitive Watch</h3><ul>" + "".join(items) + "</ul>"
+
+    # Enablement
+    enable_html = ""
+    enable = payload.get("enablement") or []
+    if isinstance(enable, list) and enable:
+        items = []
+        for e in enable:
+            if not isinstance(e, dict):
+                continue
+            skill = html_lib.escape(e.get("skill", "") or "")
+            outcome = html_lib.escape(e.get("90_day_outcome", "") or "")
+            res_url = _normalize_href(str(e.get("resource_url", "") or ""))
+            link = f'<a href="{res_url}">{html_lib.escape("Resource")}</a>' if res_url else "Resource"
+            txt = f"<strong>{skill}:</strong> {link}"
+            if outcome:
+                txt += f" – {outcome}"
+            items.append(_li(txt))
+        if items:
+            enable_html = "<h3>Enablement</h3><ul>" + "".join(items) + "</ul>"
+
+    # Actions
+    actions_html = ""
+    actions = payload.get("actions_next_week") or []
+    if isinstance(actions, list) and actions:
+        items = []
+        for a in actions:
+            if not isinstance(a, str):
+                continue
+            items.append(_li(html_lib.escape(a)))
+        if items:
+            actions_html = "<h3>Actions for Next Week</h3><ul>" + "".join(items) + "</ul>"
+
+    # Risks
+    risks_html = ""
+    risks = payload.get("risks") or []
+    if isinstance(risks, list) and risks:
+        items = []
+        for r in risks:
+            if not isinstance(r, dict):
+                continue
+            risk = html_lib.escape(r.get("risk", "") or "")
+            mit = html_lib.escape(r.get("mitigation", "") or "")
+            txt = f"<strong>{risk}</strong>: {mit}" if mit else risk
+            items.append(_li(txt))
+        if items:
+            risks_html = "<h3>Risks & Mitigations</h3><ul>" + "".join(items) + "</ul>"
+
+    # Sources
+    sources_html = ""
+    sources = payload.get("sources") or []
+    if isinstance(sources, list) and sources:
+        items = []
+        for s in sources:
+            if not isinstance(s, dict):
+                continue
+            title = html_lib.escape(s.get("title", "") or "Source")
+            url = _normalize_href(str(s.get("url", "") or ""))
+            if url:
+                items.append(_li(f'<a href="{url}">{title}</a>'))
+        if items:
+            sources_html = "<h3>All Sources</h3><ul>" + "".join(items) + "</ul>"
+
+    body_parts = [
+        f"<h2>{title}</h2>",
+    ]
+    if priority_focus:
+        body_parts.append(f"<p><strong>What matters now:</strong> {priority_focus}</p>")
+    body_parts.extend([
+        highlights_html,
+        comp_html,
+        enable_html,
+        actions_html,
+        risks_html,
+        sources_html,
+    ])
+    # Filter out empty strings
+    body = "".join([part for part in body_parts if part])
+    return body or "<h2>Workday HCM + AI – Brief</h2><p>No content available.</p>"
 
 
 # ====== OpenAI Call ======
@@ -903,6 +1087,13 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
 def write_html_to_pages(run_type: str, payload: dict) -> str:
     target = "docs/index.html" if run_type == "daily" else "docs/weekly.html"
     html = payload.get("html_body", "<h2>No content</h2>")
+    # Fallback: if the model did not provide usable HTML, render from structured fields
+    try:
+        lacks_anchors = ("<a " not in (html or "").lower())
+    except Exception:
+        lacks_anchors = False
+    if (not html or lacks_anchors) and any(payload.get(k) for k in ("highlights", "competitive_watch", "enablement", "actions_next_week", "risks", "sources")):
+        html = _render_html_from_structured(payload)
     # Optionally rewrite and normalize links; default is to preserve model HTML
     html = _rewrite_links_in_html(html)
 
@@ -920,6 +1111,22 @@ def write_html_to_pages(run_type: str, payload: dict) -> str:
             f"<pre style=\"white-space:pre-wrap;overflow-x:auto;border:1px solid #ddd;padding:12px;border-radius:6px;background:#fafafa\">{escaped_prompt}</pre>"
         )
         html = html + debug_html
+
+    # Append links to on-disk debug artifacts for easy inspection
+    try:
+        ts = str(payload.get("run_date") or TODAY_ET)
+        artifacts: list[str] = []
+        artifacts.append(
+            f'<li><a href="debug/{run_type}-{ts}-payload.json" target="_blank" rel="noopener noreferrer">Model payload JSON</a></li>'
+        )
+        if str(debug_endpoint) != "stub":
+            artifacts.append(
+                f'<li><a href="debug/{run_type}-{ts}-raw-http.json" target="_blank" rel="noopener noreferrer">Raw HTTP JSON</a></li>'
+            )
+        if artifacts:
+            html = html + ("<h3>Debug artifacts</h3><ul>" + "".join(artifacts) + "</ul>")
+    except Exception:
+        pass
     wrapper = (
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -934,6 +1141,31 @@ def write_html_to_pages(run_type: str, payload: dict) -> str:
     with open(target, "w", encoding="utf-8") as f:
         f.write(html_page)
     return target
+
+
+def write_debug_artifacts(run_type: str, payload: dict) -> list[str]:
+    """Persist model payload and raw HTTP (if present) under docs/debug.
+
+    Returns list of file paths written.
+    """
+    paths: list[str] = []
+    try:
+        _ensure_debug_dir()
+        ts = str(payload.get("run_date") or TODAY_ET)
+        # Save parsed payload as used by the app
+        payload_to_save = dict(payload)
+        raw_http = payload_to_save.pop("_debug_raw_http_json", None)
+        out_payload = os.path.join(DEBUG_DIR, f"{run_type}-{ts}-payload.json")
+        _write_json(out_payload, payload_to_save)
+        paths.append(out_payload)
+        # Save raw HTTP if available
+        if raw_http is not None:
+            out_raw = os.path.join(DEBUG_DIR, f"{run_type}-{ts}-raw-http.json")
+            _write_json(out_raw, raw_http)
+            paths.append(out_raw)
+    except Exception:
+        pass
+    return paths
 
 # ====== Email Sender ======
 def send_email(payload: dict):
@@ -1089,6 +1321,9 @@ def main():
 
     # Minimal, non-destructive post-processing
     payload = _postprocess_payload(RUN_TYPE, payload)
+
+    # Persist debug artifacts for this run (pages will link to these)
+    write_debug_artifacts(RUN_TYPE, payload)
 
     # Write to Pages and email
     target_file = write_html_to_pages(RUN_TYPE, payload)
