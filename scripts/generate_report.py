@@ -34,15 +34,25 @@ GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "").strip()
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "").strip()
 
 # Tavily tuning (can be adjusted later)
-TAVILY_SEARCH_DEPTH = "advanced"   # "basic"=1 credit; "advanced"=2 credits
+_TAVILY_SEARCH_DEPTH_DEFAULT = "advanced"   # "basic"=1 credit; "advanced"=2 credits
+TAVILY_SEARCH_DEPTH = (
+    os.environ.get("TAVILY_SEARCH_DEPTH", _TAVILY_SEARCH_DEPTH_DEFAULT).strip().lower()
+)
+if TAVILY_SEARCH_DEPTH not in {"basic", "advanced"}:
+    TAVILY_SEARCH_DEPTH = _TAVILY_SEARCH_DEPTH_DEFAULT
 
 # Prefer official/credible sources
-PREFERRED_DOMAINS = [
+_DEFAULT_PREFERRED_DOMAINS = [
     "workday.com", "blog.workday.com", "newsroom.workday.com", "community.workday.com",
     "deloitte.com", "newsroom.accenture.com", "ey.com", "kpmg.com", "pwc.com",
     "gartner.com", "forrester.com", "idc.com",
     "reuters.com", "bloomberg.com", "microsoft.com", "oracle.com", "sap.com"
 ]
+_preferred_domains_env = os.environ.get("TAVILY_PREFERRED_DOMAINS", "").strip()
+if _preferred_domains_env:
+    PREFERRED_DOMAINS = [d.strip() for d in _preferred_domains_env.split(",") if d.strip()]
+else:
+    PREFERRED_DOMAINS = _DEFAULT_PREFERRED_DOMAINS
 
 RESPONSES_JSON_SCHEMA = {
     "type": "json_schema",
