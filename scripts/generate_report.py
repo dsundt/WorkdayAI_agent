@@ -8,7 +8,7 @@ import copy
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo  # stdlib timezone support (Py 3.9+)
-from urllib.parse import urlsplit, urlunsplit, quote, unquote
+from urllib.parse import urlsplit, urlunsplit, quote, unquote, urljoin
 import html as html_lib
 
 # requests is optional at runtime; tests run without network/API.
@@ -509,6 +509,31 @@ def _percent_encode_url(url: str) -> str:
         return url
 
 
+def _get_site_base_url() -> str | None:
+    """Return absolute base URL for making relative links absolute.
+
+    Preference order:
+    1) Explicit env SITE_BASE_URL (e.g., https://user.github.io/repo/)
+    2) Derive from GITHUB_REPOSITORY for GitHub Pages project sites
+       -> https://{owner}.github.io/{repo}/
+
+    Ensures a trailing slash.
+    """
+    base = (os.environ.get("SITE_BASE_URL", "").strip() or None)
+    if not base:
+        repo = os.environ.get("GITHUB_REPOSITORY", "").strip()  # owner/repo
+        if repo and "/" in repo:
+            owner, repo_name = repo.split("/", 1)
+            if owner and repo_name:
+                base = f"https://{owner}.github.io/{repo_name}/"
+    if not base:
+        return None
+    # Normalize to include trailing slash
+    if not base.endswith("/"):
+        base = base + "/"
+    return base
+
+
 def _normalize_href(raw_val: str) -> str:
     """Normalize href values to reduce 404s and ensure absolute, launchable links.
 
@@ -545,16 +570,27 @@ def _normalize_href(raw_val: str) -> str:
     if re.match(r"^[A-Za-z0-9.-]+\.[A-Za-z]{2,}(/.*)?$", s) and not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", s):
         s = "https://" + s
 
-    # Allow anchors and mail/tel as-is
+    # Allow anchors and mail/tel and already-absolute http(s) as-is
     if s.startswith(("http://", "https://", "mailto:", "tel:", "#")):
         return _percent_encode_url(s)
 
-    # Leading slash without domain: no reliable base; fall back to anchor
-    if s.startswith("/"):
-        return "#"
+    # If we have a site base URL, absolutize root-relative and relative paths
+    site_base = _get_site_base_url()
+    if site_base:
+        try:
+            # urljoin handles both root-relative ("/foo") and relative ("bar")
+            absolute = urljoin(site_base, s)
+            # If the join still produced a relative path (unlikely), fall back to '#'
+            if not absolute.startswith(("http://", "https://")):
+                return "#"
+            return _percent_encode_url(absolute)
+        except Exception:
+            # Safety fallback to '#'
+            return "#"
 
-    # Anything else that lacks a scheme: convert to anchor to avoid broken external navigation
-    return "#"
+    # Without a known base, leave the relative value unchanged (safer than '#')
+    # Email clients may not resolve it, but do not hide the intent.
+    return _percent_encode_url(s)
 
 
 def _rewrite_links_in_html(html_markup: str) -> str:
@@ -573,16 +609,18 @@ def _rewrite_links_in_html(html_markup: str) -> str:
 
     # Permit optional whitespace around the equals sign so tags like
     # <a href = "..."> are matched (models occasionally emit this style).
+    # Support both quoted and unquoted href values. Standardize to double quotes.
     a_tag_pattern = re.compile(
-        r"<a\s+([^>]*?)href\s*=\s*([\'\"])(.*?)(?:\2)([^>]*)>",
+        r"<a\s+([^>]*?)href\s*=\s*(?:([\'\"])(.*?)(?:\2)|([^\s>]+))([^>]*)>",
         re.IGNORECASE,
     )
 
     def _replacer(match: re.Match) -> str:
         pre_attrs = match.group(1) or ""
         quote_ch = '"'  # standardize
-        href_val = match.group(3) or ""
-        post_attrs = match.group(4) or ""
+        # Group 3 is URL when quoted; group 4 when unquoted
+        href_val = (match.group(3) if match.group(3) is not None else match.group(4)) or ""
+        post_attrs = match.group(5) or ""
 
         normalized = _normalize_href(href_val)
 
@@ -904,6 +942,8 @@ def send_email(payload: dict):
         return
     subject = f"{payload.get('type','daily')} Research – {payload.get('title','Workday HCM + AI')} – {payload.get('run_date', TODAY_ET)}"
     body_html = payload.get("html_body", "<h2>No content</h2>")
+    # Normalize links in email as well to avoid broken URLs in clients
+    body_html = _rewrite_links_in_html(body_html)
     msg = MIMEText(body_html, "html", "utf-8")
     msg["Subject"] = subject
     msg["From"] = EMAIL_FROM

@@ -1,3 +1,9 @@
+Wrote: docs/index.html
+Email secrets missing; skipping email send.
+---
+Wrote: docs/weekly.html
+Email secrets missing; skipping email send.
+---
 <!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Workday HCM + AI</title><style>body{font-family:Arial,Helvetica,sans-serif;max-width:760px;margin:32px auto;padding:0 16px;line-height:1.5}</style></head><body><h2>Workday HCM + AI – Brief</h2><p><strong>What matters now:</strong> Preview build generated locally. Connect OpenAI to populate today's headlines.</p><h3>Highlights</h3><ul><li><strong>Workday AI overview:</strong> <a href="https://www.workday.com/en-us/products/ai-ml/ai.html" target="_blank" rel="noopener noreferrer">workday.com</a></li></ul><h3>Competitive Watch</h3><ul><li><strong>SAP SuccessFactors:</strong> <a href="https://www.sap.com/products/hcm/employee-experience-management/successfactors.html" target="_blank" rel="noopener noreferrer">product page</a></li></ul><h3>Enablement</h3><ul><li><strong>Prompt engineering for briefs:</strong> <a href="https://github.com/openai/openai-cookbook" target="_blank" rel="noopener noreferrer">OpenAI Cookbook</a></li></ul><h3>Actions for Next Week</h3><ul><li>Connect OpenAI API and set OPENAI_API_KEY</li><li>Review and refine prompts and section ordering</li></ul><h3>Risks & Mitigations</h3><ul><li><strong>API unavailable:</strong> falls back to local preview; ensure GitHub/CI secrets are configured.</li></ul><h3>All Sources</h3><ul><li><a href="https://www.workday.com/en-us/products/ai-ml/ai.html" target="_blank" rel="noopener noreferrer">https://www.workday.com/en-us/products/ai-ml/ai.html</a></li><li><a href="https://www.sap.com/products/hcm/employee-experience-management/successfactors.html" target="_blank" rel="noopener noreferrer">https://www.sap.com/products/hcm/employee-experience-management/successfactors.html</a></li><li><a href="https://github.com/openai/openai-cookbook" target="_blank" rel="noopener noreferrer">https://github.com/openai/openai-cookbook</a></li></ul><hr><h3>Prompt sent to OpenAI</h3><p><strong>Endpoint:</strong> stub &nbsp; <strong>Model:</strong> gpt-4.1</p><pre style="white-space:pre-wrap;overflow-x:auto;border:1px solid #ddd;padding:12px;border-radius:6px;background:#fafafa">You are “Dan – Workday AI Research Agent.” Produce a JSON object that matches the schema I’ll give you exactly.
 
 DATE CONTEXT (ET):
@@ -11,6 +17,63 @@ Rules for DAILY brief:
 - Prefer items published in the LAST_48H_WINDOW (from 2025-10-15 to 2025-10-16). If nothing relevant exists, choose the most recent credible items and explicitly say “No material items in last 48 hours; including nearest recent updates.”
 - For every item, include a working public URL and state why it matters to Deloitte’s Workday practice (client conversations, offering strategy, enablement, competitive posture).
 - Include the publication date for each “highlight” item in its text (e.g., “(Published: 2025-10-15)”).
+
+Rendering constraints:
+- Return JSON only (no prose, no Markdown, no code fences).
+- The “html_body” must be valid minimal HTML with semantic tags and absolute links:
+  - Use &lt;h2&gt; for the headline, &lt;h3&gt; for section headers, &lt;p&gt;, &lt;ul&gt;, &lt;li&gt;, and &lt;a href=&quot;https://…&quot;&gt;…&lt;/a&gt;
+  - No &lt;script&gt;, no external CSS, no images, no iframes.
+  - Short paragraphs and bullet lists for readability.
+- The “plain_text_body” must be a text-only version with full URLs visible.
+
+Return JSON ONLY in this exact shape (no code fences, no extra text):
+
+{
+  &quot;type&quot;: &quot;daily or weekly&quot;,
+  &quot;run_date&quot;: &quot;YYYY-MM-DD&quot;,
+  &quot;title&quot;: &quot;Short headline&quot;,
+  &quot;priority_focus&quot;: &quot;1–2 sentences on what matters most now&quot;,
+  &quot;highlights&quot;: [
+    { &quot;headline&quot;: &quot;…&quot;, &quot;why_it_matters&quot;: &quot;…&quot;, &quot;source_url&quot;: &quot;https://…&quot; }
+  ],
+  &quot;competitive_watch&quot;: [
+    { &quot;competitor&quot;: &quot;Name&quot;, &quot;move&quot;: &quot;…&quot;, &quot;implication&quot;: &quot;…&quot; }
+  ],
+  &quot;enablement&quot;: [
+    { &quot;skill&quot;: &quot;Topic&quot;, &quot;resource_url&quot;: &quot;https://…&quot;, &quot;90_day_outcome&quot;: &quot;…&quot; }
+  ],
+  &quot;actions_next_week&quot;: [&quot;…&quot;],
+  &quot;risks&quot;: [
+    { &quot;risk&quot;: &quot;…&quot;, &quot;mitigation&quot;: &quot;…&quot; }
+  ],
+  &quot;sources&quot;: [
+    { &quot;title&quot;: &quot;…&quot;, &quot;url&quot;: &quot;https://…&quot; }
+  ],
+  &quot;html_body&quot;: &quot;&lt;h2&gt;…&lt;/h2&gt; (well-formatted HTML with &lt;a href=&quot;https://…&quot;&gt;links&lt;/a&gt;; no scripts/external CSS)&quot;,
+  &quot;plain_text_body&quot;: &quot;Text-only with visible URLs&quot;
+}
+
+Parameters:
+- Set &quot;run_date&quot; to TODAY_ET = 2025-10-16.
+- For DAILY: set &quot;type&quot;:&quot;daily&quot;; target ~250 words; prefer items in the last 48h (from 2025-10-15 to 2025-10-16); include publication dates in highlight text.
+- For WEEKLY: set &quot;type&quot;:&quot;weekly&quot;; target 600–900 words; restrict to 2025-10-09…2025-10-16; include &lt;h3&gt;What changed this week&lt;/h3&gt; and publication dates in highlight text.
+- Section order for html_body: Highlights; Competitive Watch; Enablement; Actions for Next Week; Risks &amp; Mitigations; All Sources.
+- Every item must include at least one absolute URL (https://…).
+- Keep total HTML under ~25KB.</pre></body></html>---
+<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Workday HCM + AI</title><style>body{font-family:Arial,Helvetica,sans-serif;max-width:760px;margin:32px auto;padding:0 16px;line-height:1.5}</style></head><body><h2>Workday HCM + AI – Brief</h2><p><strong>What matters now:</strong> Preview build generated locally. Connect OpenAI to populate today's headlines.</p><h3>Highlights</h3><ul><li><strong>Workday AI overview:</strong> <a href="https://www.workday.com/en-us/products/ai-ml/ai.html" target="_blank" rel="noopener noreferrer">workday.com</a></li></ul><h3>Competitive Watch</h3><ul><li><strong>SAP SuccessFactors:</strong> <a href="https://www.sap.com/products/hcm/employee-experience-management/successfactors.html" target="_blank" rel="noopener noreferrer">product page</a></li></ul><h3>Enablement</h3><ul><li><strong>Prompt engineering for briefs:</strong> <a href="https://github.com/openai/openai-cookbook" target="_blank" rel="noopener noreferrer">OpenAI Cookbook</a></li></ul><h3>Actions for Next Week</h3><ul><li>Connect OpenAI API and set OPENAI_API_KEY</li><li>Review and refine prompts and section ordering</li></ul><h3>Risks & Mitigations</h3><ul><li><strong>API unavailable:</strong> falls back to local preview; ensure GitHub/CI secrets are configured.</li></ul><h3>All Sources</h3><ul><li><a href="https://www.workday.com/en-us/products/ai-ml/ai.html" target="_blank" rel="noopener noreferrer">https://www.workday.com/en-us/products/ai-ml/ai.html</a></li><li><a href="https://www.sap.com/products/hcm/employee-experience-management/successfactors.html" target="_blank" rel="noopener noreferrer">https://www.sap.com/products/hcm/employee-experience-management/successfactors.html</a></li><li><a href="https://github.com/openai/openai-cookbook" target="_blank" rel="noopener noreferrer">https://github.com/openai/openai-cookbook</a></li></ul><hr><h3>Prompt sent to OpenAI</h3><p><strong>Endpoint:</strong> stub &nbsp; <strong>Model:</strong> gpt-4.1</p><pre style="white-space:pre-wrap;overflow-x:auto;border:1px solid #ddd;padding:12px;border-radius:6px;background:#fafafa">You are “Dan – Workday AI Research Agent.” Produce a JSON object that matches the schema I’ll give you exactly.
+
+DATE WINDOW (ET):
+- WEEK_START_ET = 2025-10-09
+- TODAY_ET = 2025-10-16
+- Use items published from WEEK_START_ET through TODAY_ET inclusive.
+
+Topic scope: Workday; Workday HCM (Human Capital Management); Workday AI; agentic AI for Workday; broader AI for HR technology; consultant upskilling; SI/GSI (Systems Integrators / Global Systems Integrators) competitive moves.
+
+Rules for WEEKLY deep dive:
+- Target 600–900 words.
+- Synthesize trends across the window and include a &lt;h3&gt;What changed this week&lt;/h3&gt; section.
+- For every item, include a working public URL and state why it matters to Deloitte’s Workday practice.
+- Include the publication date for each “highlight” item in its text (e.g., “(Published: 2025-10-12)”).
 
 Rendering constraints:
 - Return JSON only (no prose, no Markdown, no code fences).
