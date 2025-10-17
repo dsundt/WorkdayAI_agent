@@ -1,6 +1,6 @@
 {
   "endpoint": "stub",
-  "model": "gpt-4o-mini",
+  "model": "o4-mini",
   "run_type": "daily",
   "html_preserved": true,
   "email_matches_model": true,
