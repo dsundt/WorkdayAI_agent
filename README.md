@@ -28,6 +28,7 @@ This repo publishes daily and weekly Workday/AI briefs to `/docs` (served by Git
 - Responses API now uses `text.format` for structured output instead of top-level `response_format`.
 - Chat Completions avoids `temperature` (some models only support default=1) and prefers `response_format={"type":"json_object"}` when available.
 - Set `PRESERVE_MODEL_HTML=1` to render the model's `html_body` exactly. Default is `0`, which rewrites/normalizes links so every anchor resolves.
+- Set `OPENAI_REQUIRE_LIVE=1` to fail fast if the script would otherwise fall back to the local preview stub. Useful for CI or manual runs where a live OpenAI response is mandatory.
 
 ## Outputs
 
@@ -43,6 +44,7 @@ This repo publishes daily and weekly Workday/AI briefs to `/docs` (served by Git
 ## Verify that app output matches ChatGPT JSON
 
 You can run a local verification that captures the raw JSON returned by OpenAI and compares it to what the site and email would show.
+Every published HTML page also includes a debug footer showing the exact prompt, live/stub status, and—when available—the raw JSON returned by OpenAI.
 
 ```bash
 # Verify daily (uses OPENAI_API_KEY if set; otherwise runs stub):

@@ -26,6 +26,7 @@ OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1").strip()
 # Preserve model-provided HTML only when explicitly requested; default to rewriting
 # links so published pages/emails always use launchable URLs.
 PRESERVE_MODEL_HTML = os.environ.get("PRESERVE_MODEL_HTML", "0").strip() == "1"
+OPENAI_REQUIRE_LIVE = os.environ.get("OPENAI_REQUIRE_LIVE", "0").strip() == "1"
 EMAIL_FROM = os.environ.get("EMAIL_FROM", "").strip()
 EMAIL_TO = os.environ.get("EMAIL_TO", "").strip()
 GMAIL_USERNAME = os.environ.get("GMAIL_USERNAME", "").strip()
@@ -574,22 +575,13 @@ def _normalize_href(raw_val: str) -> str:
     if s.startswith(("http://", "https://", "mailto:", "tel:", "#")):
         return _percent_encode_url(s)
 
-    # If we have a site base URL, absolutize root-relative and relative paths
-    site_base = _get_site_base_url()
-    if site_base:
-        try:
-            # urljoin handles both root-relative ("/foo") and relative ("bar")
-            absolute = urljoin(site_base, s)
-            # If the join still produced a relative path (unlikely), fall back to '#'
-            if not absolute.startswith(("http://", "https://")):
-                return "#"
-            return _percent_encode_url(absolute)
-        except Exception:
-            # Safety fallback to '#'
-            return "#"
+    # Leading slash without domain: leave relative paths untouched so humans can
+    # see the model output, but percent-encode unsafe characters.
+    if s.startswith("/"):
+        return _percent_encode_url(s)
 
-    # Without a known base, leave the relative value unchanged (safer than '#')
-    # Email clients may not resolve it, but do not hide the intent.
+    # Anything else that lacks a scheme: keep the original text rather than
+    # forcing a "#" anchor so operators can see and diagnose the value.
     return _percent_encode_url(s)
 
 
@@ -853,12 +845,15 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
     candidate_models = [m for m in candidate_models if not (m in seen_models or seen_models.add(m))]
 
     if not OPENAI_API_KEY:
+        if OPENAI_REQUIRE_LIVE:
+            raise RuntimeError("OPENAI_API_KEY is required when OPENAI_REQUIRE_LIVE=1")
         payload = _build_stub_payload(run_type)
         payload["_debug_endpoint"] = "stub"
         # Use configured model if present, otherwise the first candidate (gpt-4o-mini)
         debug_model = configured_model or (candidate_models[0] if candidate_models else "gpt-4o-mini")
         payload["_debug_model"] = debug_model
         payload["_debug_prompt"] = combined_prompt
+        payload["_debug_live"] = False
         return payload
 
     if requests is None:
@@ -990,6 +985,7 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
                     payload["_debug_prompt"] = combined_prompt
                     payload["_debug_raw_http_json"] = data
                     payload["_debug_content"] = content
+                    payload["_debug_live"] = True
                     # Retain a deep-ish copy of the parsed payload prior to any post-processing
                     try:
                         payload["_debug_parsed_from_content"] = json.loads(
@@ -1053,6 +1049,7 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
                     payload["_debug_prompt"] = combined_prompt
                     payload["_debug_raw_http_json"] = data
                     payload["_debug_content"] = content
+                    payload["_debug_live"] = True
                     try:
                         payload["_debug_parsed_from_content"] = json.loads(
                             json.dumps(payload, ensure_ascii=False)
@@ -1077,7 +1074,16 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
 
     # If we reach here, all attempts failed; return a stub to keep runs green
     if mode in ("auto", "chat", "responses"):
-        return _build_stub_payload(run_type)
+        if OPENAI_REQUIRE_LIVE:
+            if last_error:
+                raise last_error
+            raise RuntimeError("OpenAI call failed and live mode is required")
+        payload = _build_stub_payload(run_type)
+        payload["_debug_endpoint"] = "stub"
+        payload["_debug_model"] = candidate_models[0] if candidate_models else (configured_model or "gpt-4o-mini")
+        payload["_debug_prompt"] = combined_prompt
+        payload["_debug_live"] = False
+        return payload
     # Fallback (should not be reached)
     if last_error:
         raise last_error
@@ -1097,36 +1103,62 @@ def write_html_to_pages(run_type: str, payload: dict) -> str:
     # Optionally rewrite and normalize links; default is to preserve model HTML
     html = _rewrite_links_in_html(html)
 
-    # Append debug block showing the exact prompt sent to OpenAI
+    # Append debug block showing the exact prompt and raw response from OpenAI
     debug_endpoint = payload.get("_debug_endpoint", "n/a")
     debug_model = payload.get("_debug_model", "n/a")
     debug_prompt = payload.get("_debug_prompt", "")
+    debug_raw = payload.get("_debug_raw_http_json")
+    debug_live = payload.get("_debug_live")
+    debug_content = payload.get("_debug_content", "")
+    debug_sections: list[str] = []
+
     if debug_prompt:
         escaped_prompt = html_lib.escape(debug_prompt)
-        debug_html = (
-            "<hr>"
-            "<h3>Prompt sent to OpenAI</h3>"
-            f"<p><strong>Endpoint:</strong> {html_lib.escape(str(debug_endpoint))} &nbsp; "
-            f"<strong>Model:</strong> {html_lib.escape(str(debug_model))}</p>"
-            f"<pre style=\"white-space:pre-wrap;overflow-x:auto;border:1px solid #ddd;padding:12px;border-radius:6px;background:#fafafa\">{escaped_prompt}</pre>"
-        )
-        html = html + debug_html
-
-    # Append links to on-disk debug artifacts for easy inspection
-    try:
-        ts = str(payload.get("run_date") or TODAY_ET)
-        artifacts: list[str] = []
-        artifacts.append(
-            f'<li><a href="debug/{run_type}-{ts}-payload.json" target="_blank" rel="noopener noreferrer">Model payload JSON</a></li>'
-        )
-        if str(debug_endpoint) != "stub":
-            artifacts.append(
-                f'<li><a href="debug/{run_type}-{ts}-raw-http.json" target="_blank" rel="noopener noreferrer">Raw HTTP JSON</a></li>'
+        debug_sections.append(
+            (
+                "<details open><summary><strong>Prompt sent to OpenAI</strong></summary>"
+                "<pre style=\"white-space:pre-wrap;overflow-x:auto;border:1px solid #ddd;padding:12px;"
+                "border-radius:6px;background:#fafafa;margin-top:12px\">"
+                f"{escaped_prompt}" "</pre></details>"
             )
-        if artifacts:
-            html = html + ("<h3>Debug artifacts</h3><ul>" + "".join(artifacts) + "</ul>")
-    except Exception:
-        pass
+        )
+
+    if debug_raw is not None:
+        try:
+            raw_dump = json.dumps(debug_raw, ensure_ascii=False, indent=2)
+        except Exception:
+            raw_dump = repr(debug_raw)
+        escaped_raw = html_lib.escape(raw_dump)
+        debug_sections.append(
+            (
+                "<details><summary><strong>Raw OpenAI response JSON</strong></summary>"
+                "<pre style=\"white-space:pre-wrap;overflow-x:auto;border:1px solid #ddd;padding:12px;"
+                "border-radius:6px;background:#fff9e6;margin-top:12px\">"
+                f"{escaped_raw}" "</pre></details>"
+            )
+        )
+
+    if debug_content and not debug_sections:
+        escaped_content = html_lib.escape(str(debug_content))
+        debug_sections.append(
+            (
+                "<details open><summary><strong>Model content</strong></summary>"
+                "<pre style=\"white-space:pre-wrap;overflow-x:auto;border:1px solid #ddd;padding:12px;"
+                "border-radius:6px;background:#fafafa;margin-top:12px\">"
+                f"{escaped_content}" "</pre></details>"
+            )
+        )
+
+    if debug_sections:
+        live_status = "Live OpenAI response" if debug_live else "Stub preview (no live response)"
+        meta = (
+            "<hr>"
+            "<h3>OpenAI Debug</h3>"
+            f"<p><strong>Status:</strong> {html_lib.escape(live_status)} &nbsp; "
+            f"<strong>Endpoint:</strong> {html_lib.escape(str(debug_endpoint))} &nbsp; "
+            f"<strong>Model:</strong> {html_lib.escape(str(debug_model))}</p>"
+        )
+        html = html + meta + "".join(debug_sections)
     wrapper = (
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -1194,6 +1226,9 @@ def _postprocess_payload(run_type: str, payload: dict) -> dict:
     processed = dict(payload)  # shallow copy is fine; values are primitives/strings
     processed.setdefault("type", run_type)
     processed.setdefault("run_date", TODAY_ET)
+    html_body = processed.get("html_body")
+    if isinstance(html_body, str):
+        processed["html_body"] = _rewrite_links_in_html(html_body)
     return processed
 
 
@@ -1232,6 +1267,7 @@ def run_verify(default_run: str = "daily") -> int:
 
     html_preserved = (model_html == rewritten_html)
     email_matches_model = (email_html == model_html)
+    email_matches_rewritten = (email_html == rewritten_html)
 
     # If the model provided run_date/type, ensure we did not override
     model_run_date = None
@@ -1269,6 +1305,7 @@ def run_verify(default_run: str = "daily") -> int:
         "run_type": verify_run,
         "html_preserved": html_preserved,
         "email_matches_model": email_matches_model,
+        "email_matches_rewritten": email_matches_rewritten,
         "run_date_preserved": run_date_preserved,
         "type_preserved": type_preserved,
         "prompt_preview": (original.get("_debug_prompt") or "")[:3000],
@@ -1307,7 +1344,7 @@ def run_verify(default_run: str = "daily") -> int:
         print(os.path.join(DEBUG_DIR, f"{verify_run}-{ts}-chat-payload.json"))
 
     # Determine exit code: mismatch that matters?
-    ok = html_preserved and email_matches_model and run_date_preserved and type_preserved
+    ok = email_matches_rewritten and run_date_preserved and type_preserved
     return 0 if ok else 1
 
 # ====== Main ======

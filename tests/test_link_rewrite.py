@@ -58,3 +58,15 @@ def test_rewrite_links_enabled_by_default():
     assert 'target="_blank"' in rewritten
 
     sys.modules.pop("scripts.generate_report", None)
+
+
+def test_relative_links_are_not_replaced_with_fragment():
+    module = _load_module_with_preserve_setting("0")
+
+    html = '<p><a href="/news/2024/update">Latest</a></p>'
+    rewritten = module._rewrite_links_in_html(html)
+
+    assert 'href="/news/2024/update"' in rewritten
+    assert '#"' not in rewritten  # do not rewrite to fragment placeholder
+
+    sys.modules.pop("scripts.generate_report", None)
