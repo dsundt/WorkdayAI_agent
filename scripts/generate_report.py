@@ -31,6 +31,18 @@ EMAIL_FROM = os.environ.get("EMAIL_FROM", "").strip()
 EMAIL_TO = os.environ.get("EMAIL_TO", "").strip()
 GMAIL_USERNAME = os.environ.get("GMAIL_USERNAME", "").strip()
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "").strip()
+TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "").strip()
+
+# Tavily tuning (can be adjusted later)
+TAVILY_SEARCH_DEPTH = "advanced"   # "basic"=1 credit; "advanced"=2 credits
+
+# Prefer official/credible sources
+PREFERRED_DOMAINS = [
+    "workday.com", "blog.workday.com", "newsroom.workday.com", "community.workday.com",
+    "deloitte.com", "newsroom.accenture.com", "ey.com", "kpmg.com", "pwc.com",
+    "gartner.com", "forrester.com", "idc.com",
+    "reuters.com", "bloomberg.com", "microsoft.com", "oracle.com", "sap.com"
+]
 
 RESPONSES_JSON_SCHEMA = {
     "type": "json_schema",
@@ -387,6 +399,86 @@ Parameters:
 
 DEBUG_DIR = os.path.join("docs", "debug")
 
+
+def tavily_search(query: str, time_range: str, include_domains: list[str] | None = None, max_results: int = 10):
+    """
+    Call Tavily /search and return [{title,url,snippet,source,date}, ...].
+    time_range: "day","week","month","year"
+    search_depth: "basic" (1 credit) or "advanced" (2 credits)
+    """
+    if not TAVILY_API_KEY or requests is None:
+        return []
+    url = "https://api.tavily.com/search"
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {TAVILY_API_KEY}"}
+    payload = {
+        "query": query,
+        "search_depth": TAVILY_SEARCH_DEPTH,
+        "time_range": time_range,
+        "max_results": max_results,
+        "include_answer": False,
+        "include_raw_content": False
+    }
+    if include_domains:
+        payload["include_domains"] = include_domains
+    try:
+        r = requests.post(url, headers=headers, data=json.dumps(payload), timeout=20)
+        r.raise_for_status()
+        data = r.json()
+    except Exception:
+        return []
+    out = []
+    for item in data.get("results", []) or []:
+        link = (item.get("url") or "").strip()
+        if not link:
+            continue
+        out.append({
+            "title": (item.get("title") or "").strip(),
+            "url": link,
+            "snippet": (item.get("content") or "").strip(),
+            "source": (item.get("source") or "").strip(),
+            "date": item.get("published_date") or None
+        })
+    return out
+
+
+def build_context(run_type: str):
+    """
+    Build a vetted source list using Tavily.
+    - DAILY: time_range = "day"
+    - WEEKLY: time_range = "week"
+    Bias to PREFERRED_DOMAINS.
+    """
+    time_range = "day" if run_type == "daily" else "week"
+    queries = [
+        "Workday HCM AI",
+        "site:blog.workday.com (AI OR artificial intelligence OR genai) Workday HCM",
+        "site:newsroom.workday.com Workday AI HCM",
+        "agentic AI Workday HCM",
+        "Workday skills cloud AI",
+        "Workday partner GSI AI"
+    ]
+    results = []
+    for q in queries:
+        results.extend(tavily_search(q, time_range, include_domains=PREFERRED_DOMAINS, max_results=10))
+
+    # de-duplicate by URL
+    seen = set()
+    deduped = []
+    for it in results:
+        u = it["url"]
+        if u in seen:
+            continue
+        seen.add(u)
+        deduped.append(it)
+
+    if not deduped:
+        return [], "NO_SEARCH_RESULTS"
+
+    # Compact context string given to the model
+    lines = [f"{i+1}. {it['title']} — {it['url']}" for i, it in enumerate(deduped)]
+    return deduped, "\n".join(lines)
+
+
 def _build_stub_payload(run_type: str) -> dict:
     """Return a production-style preview payload when the API is unavailable.
 
@@ -493,6 +585,47 @@ def _build_stub_payload(run_type: str) -> dict:
         ),
     }
     return payload
+
+
+def _build_no_results_payload(run_type: str) -> dict:
+    """Return a payload noting that no credible sources were available."""
+
+    window_desc = "last day" if run_type == "daily" else "last week"
+    title = "No credible Workday AI updates"
+    message = f"No credible items found in the {window_desc} window."
+    html_body = (
+        f"<h2>Workday HCM + AI – {run_type.title()} Brief</h2>"
+        f"<p>{html_lib.escape(message)}</p>"
+        "<p>Sources will resume once new vetted updates are available.</p>"
+    )
+    plain_text_body = (
+        f"Workday HCM + AI – {run_type.title()} Brief\n"
+        f"{message}\n"
+        "Sources will resume once new vetted updates are available."
+    )
+    return {
+        "type": run_type,
+        "run_date": TODAY_ET,
+        "title": title,
+        "priority_focus": message,
+        "highlights": [],
+        "competitive_watch": [],
+        "enablement": [],
+        "actions_next_week": [],
+        "risks": [],
+        "sources": [],
+        "html_body": html_body,
+        "plain_text_body": plain_text_body,
+    }
+
+
+def _make_user_prompt(context_text: str) -> str:
+    header = (
+        "Use the following vetted sources to craft the brief.\n"
+        "SOURCE LIST (you must ONLY cite these; do not fabricate new sources or URLs):\n"
+        f"{context_text}\n\n"
+    )
+    return header + USER_PROMPT_SCHEMA
 
 
 def _percent_encode_url(url: str) -> str:
@@ -823,9 +956,24 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
     If any API call fails or returns an unexpected payload, return a stub payload
     so CI can continue (and Pages/email still get generated).
     """
+    # Gather Tavily context and build prompts up-front for debugging
+    context_results, context_text_or_flag = build_context(run_type)
+    if context_text_or_flag == "NO_SEARCH_RESULTS":
+        payload = _build_no_results_payload(run_type)
+        payload["_debug_endpoint"] = "no-search-results"
+        payload["_debug_model"] = None
+        payload["_debug_prompt"] = "OpenAI skipped: no credible Tavily sources available."
+        payload["_debug_live"] = False
+        payload["_debug_context_sources"] = context_results
+        payload["_debug_context_text"] = context_text_or_flag
+        return payload
+
+    context_text = context_text_or_flag
+
     # Compute prompt data up-front so we can expose it in HTML for debugging
     system_prompt = SYSTEM_PROMPT_DAILY if run_type == "daily" else SYSTEM_PROMPT_WEEKLY
-    combined_prompt = f"{system_prompt}\n\n{USER_PROMPT_SCHEMA}"
+    user_prompt = _make_user_prompt(context_text)
+    combined_prompt = f"{system_prompt}\n\n{user_prompt}"
     # Build model candidate list with sensible fallbacks
     configured_model = (OPENAI_MODEL or "").strip()
     candidate_models: list[str] = [
@@ -854,6 +1002,8 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
         payload["_debug_model"] = debug_model
         payload["_debug_prompt"] = combined_prompt
         payload["_debug_live"] = False
+        payload["_debug_context_sources"] = context_results
+        payload["_debug_context_text"] = context_text
         return payload
 
     if requests is None:
@@ -948,7 +1098,7 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
             responses_url = "https://api.openai.com/v1/responses"
             if mode in ("auto", "responses"):
                 responses_variants = _responses_payload_variants(
-                    model_in_use, system_prompt, USER_PROMPT_SCHEMA
+                    model_in_use, system_prompt, user_prompt
                 )
                 responses_error: Exception | None = None
                 for idx, payload_variant in enumerate(responses_variants):
@@ -986,6 +1136,8 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
                     payload["_debug_raw_http_json"] = data
                     payload["_debug_content"] = content
                     payload["_debug_live"] = True
+                    payload["_debug_context_sources"] = context_results
+                    payload["_debug_context_text"] = context_text
                     # Retain a deep-ish copy of the parsed payload prior to any post-processing
                     try:
                         payload["_debug_parsed_from_content"] = json.loads(
@@ -1012,7 +1164,7 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
         try:
             chat_url = "https://api.openai.com/v1/chat/completions"
             if mode in ("auto", "chat"):
-                chat_variants = _chat_payload_variants(model_in_use, system_prompt, USER_PROMPT_SCHEMA)
+                chat_variants = _chat_payload_variants(model_in_use, system_prompt, user_prompt)
                 chat_error: Exception | None = None
                 for idx, payload_variant in enumerate(chat_variants):
                     try:
@@ -1050,6 +1202,8 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
                     payload["_debug_raw_http_json"] = data
                     payload["_debug_content"] = content
                     payload["_debug_live"] = True
+                    payload["_debug_context_sources"] = context_results
+                    payload["_debug_context_text"] = context_text
                     try:
                         payload["_debug_parsed_from_content"] = json.loads(
                             json.dumps(payload, ensure_ascii=False)
@@ -1069,7 +1223,14 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
                 )
                 # In chat-only mode, return stub immediately; in auto, try next model
                 if mode == "chat":
-                    return _build_stub_payload(run_type)
+                    stub_payload = _build_stub_payload(run_type)
+                    stub_payload["_debug_endpoint"] = "stub"
+                    stub_payload["_debug_model"] = model_in_use
+                    stub_payload["_debug_prompt"] = combined_prompt
+                    stub_payload["_debug_live"] = False
+                    stub_payload["_debug_context_sources"] = context_results
+                    stub_payload["_debug_context_text"] = context_text
+                    return stub_payload
                 continue
 
     # If we reach here, all attempts failed; return a stub to keep runs green
@@ -1083,6 +1244,8 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
         payload["_debug_model"] = candidate_models[0] if candidate_models else (configured_model or "gpt-4o-mini")
         payload["_debug_prompt"] = combined_prompt
         payload["_debug_live"] = False
+        payload["_debug_context_sources"] = context_results
+        payload["_debug_context_text"] = context_text
         return payload
     # Fallback (should not be reached)
     if last_error:
