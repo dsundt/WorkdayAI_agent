@@ -60,7 +60,7 @@ def _unique_payload_variants(payloads: list[dict]) -> list[dict]:
 def _responses_payload_variants(model: str, system_prompt: str, user_prompt: str) -> list[dict]:
     """Build payload variants for the Responses API to maximize compatibility.
 
-    - Use text.format for structured output (json_schema/json_object)
+    - Use text.format (object) for structured output (json_schema/json_object)
     - Omit temperature (some models only support default=1)
     - Prefer simple string input for portability
     """
@@ -68,9 +68,12 @@ def _responses_payload_variants(model: str, system_prompt: str, user_prompt: str
     combined_input = f"{system_prompt}\n\n{user_prompt}"
 
     # Translate legacy RESPONSES_JSON_SCHEMA into the new text.format shape
+    # New API expects text.format to be an OBJECT, not a string literal.
     text_format_json_schema = {
-        "format": "json_schema",
-        "json_schema": RESPONSES_JSON_SCHEMA.get("json_schema", {}),
+        "format": {
+            "type": "json_schema",
+            "json_schema": RESPONSES_JSON_SCHEMA.get("json_schema", {}),
+        }
     }
 
     base = {
@@ -83,7 +86,7 @@ def _responses_payload_variants(model: str, system_prompt: str, user_prompt: str
 
     # Some deployments reject json_schema; fall back to json_object, then to no schema.
     json_object_variant = copy.deepcopy(base)
-    json_object_variant["text"] = {"format": "json_object"}
+    json_object_variant["text"] = {"format": {"type": "json_object"}}
     variants.append(json_object_variant)
 
     no_schema_variant = copy.deepcopy(json_object_variant)
