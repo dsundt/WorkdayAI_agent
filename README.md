@@ -61,3 +61,25 @@ python3 scripts/generate_report.py verify daily
 The verification report ensures:
 - `html_body` is preserved in Pages and email only when `PRESERVE_MODEL_HTML=1`.
 - `run_date` and `type` from the model are not overridden (they are only set if missing).
+
+## How to tell whether a run used live OpenAI data
+
+Every artifact the pipeline produces includes debug metadata so you can confirm
+that the request reached OpenAI and returned a live payload:
+
+- The generated HTML (for example `/docs/index.html`) prints an **OpenAI
+  Debug** footer that shows the prompt that was sent, the selected endpoint,
+  model, and whether the run is flagged as a “Live OpenAI response” or a
+  “Stub preview.” When the call succeeds, the footer also embeds the full raw
+  JSON returned by the API, exactly as received.
+- Each invocation of `call_openai` stores `_debug_live=True` along with the raw
+  HTTP JSON when a Responses or Chat Completions request succeeds. If the
+  script must fall back to local preview data (for example because
+  `OPENAI_API_KEY` is not set), `_debug_live` is `False` and the footer labels
+  the run as a stub.
+- Additional artifacts in `docs/debug/` capture the parsed payload and raw HTTP
+  JSON per run, making it easy to audit what OpenAI returned versus what is
+  published.
+
+Together these signals let you trace each brief back to the exact API response
+that generated it and quickly spot when the pipeline is operating in stub mode.
