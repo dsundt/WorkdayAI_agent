@@ -83,3 +83,41 @@ that the request reached OpenAI and returned a live payload:
 
 Together these signals let you trace each brief back to the exact API response
 that generated it and quickly spot when the pipeline is operating in stub mode.
+
+## Make results reliably real
+
+To ensure the brief reflects verifiable, current items instead of unconstrained model output:
+
+- **Enforce live API responses**
+  - Set `OPENAI_REQUIRE_LIVE=1` so runs fail fast rather than publishing the local preview.
+  - Example (daily workflow step):
+
+  ```yaml
+  - name: Generate daily report
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_REQUIRE_LIVE: "1"
+      EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+      EMAIL_TO: ${{ secrets.EMAIL_TO }}
+      GMAIL_USERNAME: ${{ secrets.GMAIL_USERNAME }}
+      GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+    run: python scripts/generate_report.py daily
+  ```
+
+- **Add retrieval and verification before summarization**
+  - Fetch candidate links via a trusted source (e.g., Bing Web Search API, NewsAPI, vendor newsroom RSS) constrained to target domains (Workday, Deloitte, major SIs, reputable tech press).
+  - Validate links with HTTP HEAD/GET (short timeouts); keep only 2xx responses and acceptable `content-type` (e.g., `text/html`).
+  - Extract publication timestamps from Open Graph / schema.org Article metadata or source APIs; filter to the last-48h (daily) or week window (weekly).
+  - Pass the curated URLs and brief excerpts into the model as context; instruct the model to summarize only from the provided sources.
+  - If no items pass validation, print “No material items in last 48 hours; including nearest recent updates.” and include only verified nearest recents.
+
+- **Optional: commit debug artifacts for audit**
+  - Also commit `docs/debug/*` so the raw HTTP and parsed payloads for each run are visible in Pages.
+  - Example addition to the commit step:
+
+  ```bash
+  git add docs/index.html docs/debug/*.json
+  git commit -m "Daily brief + debug: $(date -u +'%Y-%m-%dT%H:%M:%SZ')" || echo "No changes to commit"
+  ```
+
+These steps keep links launchable, dates accurate, and the brief grounded in verifiable sources while still leveraging the model for concise synthesis.
