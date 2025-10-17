@@ -34,8 +34,102 @@ RESPONSES_JSON_SCHEMA = {
     "type": "json_schema",
     "json_schema": {
         "name": "workday_ai_report",
-        # Allow the model to return any JSON object; validation happens later.
-        "schema": {"type": "object"},
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "type",
+                "run_date",
+                "title",
+                "priority_focus",
+                "highlights",
+                "competitive_watch",
+                "enablement",
+                "actions_next_week",
+                "risks",
+                "sources",
+                "html_body",
+                "plain_text_body",
+            ],
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "enum": ["daily", "weekly"],
+                },
+                "run_date": {"type": "string"},
+                "title": {"type": "string"},
+                "priority_focus": {"type": "string"},
+                "highlights": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["headline", "why_it_matters", "source_url"],
+                        "properties": {
+                            "headline": {"type": "string"},
+                            "why_it_matters": {"type": "string"},
+                            "source_url": {"type": "string"},
+                        },
+                    },
+                },
+                "competitive_watch": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["competitor", "move", "implication"],
+                        "properties": {
+                            "competitor": {"type": "string"},
+                            "move": {"type": "string"},
+                            "implication": {"type": "string"},
+                        },
+                    },
+                },
+                "enablement": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["skill", "resource_url", "90_day_outcome"],
+                        "properties": {
+                            "skill": {"type": "string"},
+                            "resource_url": {"type": "string"},
+                            "90_day_outcome": {"type": "string"},
+                        },
+                    },
+                },
+                "actions_next_week": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "risks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["risk", "mitigation"],
+                        "properties": {
+                            "risk": {"type": "string"},
+                            "mitigation": {"type": "string"},
+                        },
+                    },
+                },
+                "sources": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["title", "url"],
+                        "properties": {
+                            "title": {"type": "string"},
+                            "url": {"type": "string"},
+                        },
+                    },
+                },
+                "html_body": {"type": "string"},
+                "plain_text_body": {"type": "string"},
+            },
+        },
     },
 }
 
