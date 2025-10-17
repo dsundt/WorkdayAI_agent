@@ -67,22 +67,41 @@ def _responses_payload_variants(model: str, system_prompt: str, user_prompt: str
 
     combined_input = f"{system_prompt}\n\n{user_prompt}"
 
-    # Translate legacy RESPONSES_JSON_SCHEMA into the new text.format shape
-    # New API expects text.format to be an OBJECT, not a string literal.
-    text_format_json_schema = {
+    # Translate legacy RESPONSES_JSON_SCHEMA into the latest text.format shape.
+    # Newer API variants require text.format.name at the top level, alongside schema.
+    schema_meta = RESPONSES_JSON_SCHEMA.get("json_schema", {}) or {}
+    schema_name = schema_meta.get("name") or "workday_ai_report"
+    schema_def = schema_meta.get("schema") or {}
+
+    # Preferred (current) shape: name and schema are top-level under text.format
+    text_format_preferred = {
         "format": {
             "type": "json_schema",
-            "json_schema": RESPONSES_JSON_SCHEMA.get("json_schema", {}),
+            "name": schema_name,
+            "schema": schema_def,
+        }
+    }
+
+    # Back-compat shape: nest {name, schema} under json_schema for older proxies
+    text_format_legacy_nested = {
+        "format": {
+            "type": "json_schema",
+            "json_schema": {"name": schema_name, "schema": schema_def},
         }
     }
 
     base = {
         "model": model,
         "input": combined_input,
-        "text": text_format_json_schema,
+        "text": text_format_preferred,
     }
 
     variants: list[dict] = [base]
+
+    # Compatibility variant using the legacy-nested json_schema shape
+    legacy_nested_variant = copy.deepcopy(base)
+    legacy_nested_variant["text"] = text_format_legacy_nested
+    variants.append(legacy_nested_variant)
 
     # Some deployments reject json_schema; fall back to json_object, then to no schema.
     json_object_variant = copy.deepcopy(base)
@@ -96,7 +115,7 @@ def _responses_payload_variants(model: str, system_prompt: str, user_prompt: str
     # Alternate shape: message-style input with explicit blocks (for older proxies)
     messages_shape = {
         "model": model,
-        "text": text_format_json_schema,
+        "text": text_format_preferred,
         "input": [
             {
                 "role": "system",
