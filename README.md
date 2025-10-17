@@ -23,11 +23,11 @@ This repo publishes daily and weekly Workday/AI briefs to `/docs` (served by Git
 
 ## Model
 
-- Default model is `o4-mini` (override with env `OPENAI_MODEL`).
-- Automatic fallbacks: `OPENAI_MODEL` → `o4-mini` → `gpt-4.1-mini` → `gpt-4o-mini` → `gpt-4o`.
+- Default model is `gpt-4.1` (override with env `OPENAI_MODEL`).
+- Automatic fallbacks: `OPENAI_MODEL` → `gpt-4.1` → `gpt-4.1-mini` → `gpt-4o-mini` → `gpt-4o` → `o4-mini`.
 - Responses API now uses `text.format` for structured output instead of top-level `response_format`.
 - Chat Completions avoids `temperature` (some models only support default=1) and prefers `response_format={"type":"json_object"}` when available.
-- Set `PRESERVE_MODEL_HTML=1` (default) to render the model's `html_body` exactly. Set to `0` to enable link rewriting/normalization.
+- Set `PRESERVE_MODEL_HTML=1` to render the model's `html_body` exactly. Default is `0`, which rewrites/normalizes links so every anchor resolves.
 
 ## Outputs
 
@@ -57,5 +57,5 @@ python3 scripts/generate_report.py verify daily
 ```
 
 The verification report ensures:
-- `html_body` is preserved in Pages and email when `PRESERVE_MODEL_HTML=1`.
+- `html_body` is preserved in Pages and email only when `PRESERVE_MODEL_HTML=1`.
 - `run_date` and `type` from the model are not overridden (they are only set if missing).
