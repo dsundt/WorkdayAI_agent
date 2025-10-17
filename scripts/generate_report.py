@@ -60,34 +60,40 @@ def _unique_payload_variants(payloads: list[dict]) -> list[dict]:
 def _responses_payload_variants(model: str, system_prompt: str, user_prompt: str) -> list[dict]:
     """Build payload variants for the Responses API to maximize compatibility.
 
-    - Use top-level response_format for JSON schema guidance
+    - Use text.format for structured output (json_schema/json_object)
     - Omit temperature (some models only support default=1)
     - Prefer simple string input for portability
     """
 
     combined_input = f"{system_prompt}\n\n{user_prompt}"
 
+    # Translate legacy RESPONSES_JSON_SCHEMA into the new text.format shape
+    text_json_schema = {
+        "format": "json_schema",
+        "json_schema": RESPONSES_JSON_SCHEMA.get("json_schema", {}),
+    }
+
     base = {
         "model": model,
         "input": combined_input,
-        "response_format": RESPONSES_JSON_SCHEMA,
+        "text": text_json_schema,
     }
 
     variants: list[dict] = [base]
 
     # Some deployments reject json_schema; fall back to json_object, then to no schema.
     json_object_variant = copy.deepcopy(base)
-    json_object_variant["response_format"] = {"type": "json_object"}
+    json_object_variant["text"] = {"format": "json_object"}
     variants.append(json_object_variant)
 
     no_schema_variant = copy.deepcopy(json_object_variant)
-    no_schema_variant.pop("response_format", None)
+    no_schema_variant.pop("text", None)
     variants.append(no_schema_variant)
 
     # Alternate shape: message-style input with explicit blocks (for older proxies)
     messages_shape = {
         "model": model,
-        "response_format": RESPONSES_JSON_SCHEMA,
+        "text": text_json_schema,
         "input": [
             {
                 "role": "system",
@@ -101,9 +107,9 @@ def _responses_payload_variants(model: str, system_prompt: str, user_prompt: str
     }
     variants.append(messages_shape)
 
-    # Message shape without response_format for strict proxies
+    # Message shape without text/format for strict proxies
     messages_no_schema = copy.deepcopy(messages_shape)
-    messages_no_schema.pop("response_format", None)
+    messages_no_schema.pop("text", None)
     variants.append(messages_no_schema)
 
     return _unique_payload_variants(variants)
