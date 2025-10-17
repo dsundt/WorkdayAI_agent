@@ -22,9 +22,10 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 # Allow overriding model from environment; choose a strong default for best results
 # Prefer widely available, JSON-mode compatible default
 # Users can override via OPENAI_MODEL
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "o4-mini").strip()
-# Preserve model-provided HTML exactly by default to match ChatGPT UI
-PRESERVE_MODEL_HTML = os.environ.get("PRESERVE_MODEL_HTML", "1").strip() == "1"
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1").strip()
+# Preserve model-provided HTML only when explicitly requested; default to rewriting
+# links so published pages/emails always use launchable URLs.
+PRESERVE_MODEL_HTML = os.environ.get("PRESERVE_MODEL_HTML", "0").strip() == "1"
 EMAIL_FROM = os.environ.get("EMAIL_FROM", "").strip()
 EMAIL_TO = os.environ.get("EMAIL_TO", "").strip()
 GMAIL_USERNAME = os.environ.get("GMAIL_USERNAME", "").strip()
@@ -617,10 +618,11 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
         m
         for m in [
             configured_model,
-            "o4-mini",
+            "gpt-4.1",
             "gpt-4.1-mini",
             "gpt-4o-mini",
             "gpt-4o",
+            "o4-mini",
         ]
         if m
     ]
