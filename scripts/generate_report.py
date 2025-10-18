@@ -370,7 +370,7 @@ DATE CONTEXT (ET):
 Topic scope: Workday; Workday HCM (Human Capital Management); Workday AI; agentic AI for Workday; broader AI for HR technology; consultant upskilling; SI/GSI (Systems Integrators / Global Systems Integrators) competitive moves.
 
 Rules for DAILY brief:
-- Target ~250 words total.
+- Target ~600 words total.
 - Prefer items published in the LAST_48H_WINDOW (from {YESTERDAY_ET} to {TODAY_ET}). If nothing relevant exists, choose the most recent credible items and explicitly say “No material items in last 48 hours; including nearest recent updates.”
 - For every item, include a working public URL and state why it matters to Deloitte’s Workday practice (client conversations, offering strategy, enablement, competitive posture).
 - Include the publication date for each “highlight” item in its text (e.g., “(Published: 2025-10-15)”).
@@ -395,7 +395,7 @@ DATE WINDOW (ET):
 Topic scope: Workday; Workday HCM (Human Capital Management); Workday AI; agentic AI for Workday; broader AI for HR technology; consultant upskilling; SI/GSI (Systems Integrators / Global Systems Integrators) competitive moves.
 
 Rules for WEEKLY deep dive:
-- Target 600–900 words.
+- Target 1000-1500 words.
 - Synthesize trends across the window and include a <h3>What changed this week</h3> section.
 - For every item, include a working public URL and state why it matters to Deloitte’s Workday practice.
 - Include the publication date for each “highlight” item in its text (e.g., “(Published: 2025-10-12)”).
