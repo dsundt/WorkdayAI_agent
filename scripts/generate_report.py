@@ -47,10 +47,35 @@ if TAVILY_SEARCH_DEPTH not in {"basic", "advanced"}:
 
 # Prefer official/credible sources
 _DEFAULT_PREFERRED_DOMAINS = [
+    # Workday official
     "workday.com", "blog.workday.com", "newsroom.workday.com", "community.workday.com",
-    "deloitte.com", "newsroom.accenture.com", "ey.com", "kpmg.com", "pwc.com",
+    "investor.workday.com", "developers.workday.com",
+
+    # Deloitte + other GSIs / SIs
+    "deloitte.com", "newsroom.accenture.com", "accenture.com",
+    "ey.com", "kpmg.com", "pwc.com",
+    "ibm.com", "capgemini.com", "infosys.com", "tcs.com", "wipro.com", "cognizant.com",
+
+    # Leading Workday partners / boutiques
+    "kainos.com", "invisors.com", "topbloc.com", "onesourcevirtual.com", "alight.com", "mercer.com", "avaap.com",
+
+    # Competitors & adjacent platforms
+    "oracle.com", "sap.com", "successfactors.com", "ukg.com", "adp.com", "ceridian.com", "dayforce.com",
+    "servicenow.com", "salesforce.com", "microsoft.com", "googlecloud.google", "cloud.google.com", "aws.amazon.com",
+
+    # Integration / data / security ecosystem
+    "mulesoft.com", "boomi.com", "workato.com",
+    "okta.com", "auth0.com",
+    "snowflake.com", "databricks.com",
+    "collibra.com", "alation.com",
+
+    # Analysts & credible media
     "gartner.com", "forrester.com", "idc.com",
-    "reuters.com", "bloomberg.com", "microsoft.com", "oracle.com", "sap.com"
+    "reuters.com", "bloomberg.com", "wsj.com", "ft.com",
+    "venturebeat.com", "techcrunch.com", "infoq.com", "theregister.com",
+
+    # Standards / policy (risk, compliance)
+    "nist.gov", "eeoc.gov", "europa.eu",
 ]
 _preferred_domains_env = os.environ.get("TAVILY_PREFERRED_DOMAINS", "").strip()
 if _preferred_domains_env:
@@ -538,16 +563,161 @@ def build_context(run_type: str):
     Bias to PREFERRED_DOMAINS.
     """
     time_range = "day" if run_type == "daily" else "week"
-    queries = [
-        "Workday HCM AI",
-        "site:blog.workday.com (AI OR artificial intelligence OR genai) Workday HCM",
-        "site:newsroom.workday.com Workday AI HCM",
-        "agentic AI Workday HCM",
-        "Workday skills cloud AI",
-        "Workday partner GSI AI"
-    ]
-    results = []
+
+    def _week_index(dt: datetime) -> int:
+        # ISO week of year, stable rotation key
+        return int(dt.strftime("%G%V"))
+
+    def _theme_boosters(now: datetime) -> list[str]:
+        boosters = [
+            "skills graph",
+            "recruiting AI agents",
+            "payroll agents",
+            "employee experience copilots",
+        ]
+        # Rotate deterministically by ISO week
+        idx = _week_index(now) % len(boosters)
+        # Pick two adjacent boosters for variety
+        chosen = [boosters[idx], boosters[(idx + 1) % len(boosters)]]
+        # Scope to Workday/HR tech context
+        themed = []
+        for b in chosen:
+            themed.append(f"Workday {b} HCM")
+            themed.append(f"HR technology {b} Workday")
+        return themed
+
+    def _daily_queries() -> list[str]:
+        return [
+            # Core Workday + Agentic AI
+            "Workday agentic AI HCM",
+            "site:blog.workday.com (agentic OR autonomous OR copilots OR AI) Workday HCM",
+            "site:newsroom.workday.com (AI OR agent) announcement",
+            "Workday Extend agentic AI use cases",
+            "Workday Skills Cloud AI orchestration",
+            "Workday Prism Analytics AI governance",
+            "Workday AI Marketplace partners",
+
+            # Competitors' AI in HCM/ERP
+            "SAP SuccessFactors AI agentic HCM",
+            "Oracle Fusion HCM AI agent OR copilot",
+            "UKG AI HCM copilot",
+            "ADP AI HCM innovations",
+            "Dayforce (Ceridian) AI HCM agent",
+            "ServiceNow HRSD AI agent HR service delivery",
+
+            # Integrations / platform enablers
+            "Workday + Microsoft Copilot integration",
+            "Workday + AWS Bedrock agent",
+            "Workday + Google Cloud gen AI partnership",
+            "Workday + Salesforce integration AI HCM",
+            "Workday + MuleSoft OR Boomi OR Workato integration AI",
+
+            # Risk, trust, compliance
+            "Workday AI governance bias mitigation HCM",
+            "Responsible AI HR technology Workday",
+
+            # GSIs / SIs moves (fresh press/POVs)
+            "site:newsroom.accenture.com Workday AI",
+            "site:deloitte.com Workday AI POV",
+            "site:ey.com Workday AI",
+            "site:kpmg.com Workday AI",
+            "site:pwc.com Workday AI",
+            "site:ibm.com Workday AI",
+            "site:capgemini.com Workday AI",
+            "site:infosys.com Workday AI Workday",
+            "site:tcs.com Workday AI",
+            "site:wipro.com Workday AI",
+
+            # Boutiques / leading partners
+            "site:kainos.com Workday AI",
+            "site:invisors.com Workday AI",
+            "site:topbloc.com Workday AI",
+            "site:onesourcevirtual.com Workday AI",
+            "site:alight.com Workday Workday AI",
+            "site:mercer.com Workday AI",
+        ]
+
+    def _weekly_queries(now: datetime) -> list[str]:
+        base = [
+            # Strategy & architecture
+            "Agentic AI in SaaS enterprise patterns orchestration",
+            "Autonomous agents HR tech governance ROI case studies",
+            "RAG orchestration HR data Workday integrations",
+            "Workday Extend patterns agentic automations reference architectures",
+
+            # Workday product + platform deep dives
+            "Workday Skills Cloud AI roadmap",
+            "Workday Prism Analytics AI data quality lineage",
+            "Workday AI Marketplace catalog partners",
+            "Workday Rising announcements AI",
+            "Workday DevCon agentic demos Extend",
+            "VNDLY Workday AI procurement workforce apps",
+
+            # Competitive landscape (HCM/ERP)
+            "Oracle Fusion HCM gen AI roadmap agent",
+            "SAP SuccessFactors Joule agent capabilities",
+            "ServiceNow Now Assist HR agentic",
+            "UKG Pro AI copilot HCM",
+            "Dayforce AI roadmap agent",
+            "Microsoft Copilot HR integrations Workday",
+            "Google Vertex AI HR solutions Workday partner",
+
+            # Integration / ecosystem enablers
+            "MuleSoft Workday AI integration blueprint",
+            "Boomi Workday HR integration AI",
+            "Workato Workday HR automations AI",
+            "Okta Workday lifecycle automation + AI",
+            "Snowflake Workday data + gen AI",
+            "Databricks Workday HR analytics gen AI",
+
+            # Risk, trust, compliance
+            "Responsible AI in HR technology guidelines",
+            "EEOC algorithmic bias HR AI guidance",
+            "NIST AI RMF HR use cases",
+            "EU AI Act HR impact Workday",
+
+            # GSIs / SIs POVs & offers
+            "site:deloitte.com Workday AI point of view",
+            "site:newsroom.accenture.com Workday AI platform",
+            "site:ey.com Workday gen AI",
+            "site:kpmg.com Workday AI accelerators",
+            "site:pwc.com Workday AI transformation",
+            "site:ibm.com Workday AI consulting",
+            "site:capgemini.com Workday generative AI",
+            "site:infosys.com Live Enterprise Workday AI",
+            "site:tcs.com Workday gen AI",
+            "site:wipro.com ai360 Workday",
+
+            # Boutiques / leading partners
+            "site:kainos.com Workday AI case study",
+            "site:invisors.com Workday AI",
+            "site:topbloc.com AI Workday",
+            "site:onesourcevirtual.com AI Workday",
+            "site:alight.com Workday AI",
+            "site:mercer.com gen AI Workday",
+
+            # Analysts & credible press
+            "Gartner HCM suite AI agent research",
+            "Forrester generative AI HR platforms Wave",
+            "IDC Workday AI assessment",
+            "Reuters Workday AI news",
+            "Bloomberg Workday AI strategy",
+            "VentureBeat HR AI agents Workday",
+            "TechCrunch Workday AI",
+        ]
+        return base + _theme_boosters(now)
+
+    # Build query set
+    now = now_et
+    if run_type == "daily":
+        queries = _daily_queries()
+    else:
+        queries = _weekly_queries(now)
+
+    results: list[dict] = []
     tavily_debug: list[dict] = []
+
+    # First pass: bias to preferred domains
     for q in queries:
         results.extend(
             tavily_search(
@@ -559,22 +729,129 @@ def build_context(run_type: str):
             )
         )
 
-    # de-duplicate by URL
-    seen = set()
-    deduped = []
-    for it in results:
-        u = it["url"]
-        if u in seen:
-            continue
-        seen.add(u)
-        deduped.append(it)
+    # Optional broaden pass if not enough results
+    broaden_threshold = 8
+    if len(results) < broaden_threshold:
+        for q in queries:
+            results.extend(
+                tavily_search(
+                    q,
+                    time_range,
+                    include_domains=None,
+                    max_results=5,
+                    debug_log=tavily_debug,
+                )
+            )
 
-    if not deduped:
+    # ---- De-duplication helpers ----
+    def _normalize_url(url: str) -> str:
+        try:
+            parts = urlsplit(url)
+            # Drop fragments; remove common tracking params
+            query_pairs = []
+            if parts.query:
+                drop = {
+                    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+                    "gclid", "fbclid", "msclkid", "ocid", "sc_cid",
+                }
+                for kv in parts.query.split("&"):
+                    if not kv:
+                        continue
+                    if "=" in kv:
+                        k, v = kv.split("=", 1)
+                    else:
+                        k, v = kv, ""
+                    if k.lower() in drop:
+                        continue
+                    query_pairs.append((k, v))
+            query_str = "&".join([f"{k}={v}" if v else k for k, v in query_pairs])
+            # Normalize // and trailing slash on path
+            path = parts.path or "/"
+            norm = urlunsplit((parts.scheme or "https", parts.netloc.lower(), path, query_str, ""))
+            return norm.rstrip("/")
+        except Exception:
+            return url
+
+    def _hostname(url: str) -> str:
+        try:
+            return (urlsplit(url).netloc or "").lower().lstrip("www.")
+        except Exception:
+            return ""
+
+    def _score(item: dict) -> int:
+        title = (item.get("title") or "").strip()
+        snippet = (item.get("snippet") or "").strip()
+        # Favor longer, descriptive titles/snippets; cap contribution to avoid bias
+        return min(len(title), 180) + min(len(snippet), 400)
+
+    # 1) Deduplicate by normalized URL, keep highest score
+    by_url: dict[str, dict] = {}
+    for it in results:
+        u_norm = _normalize_url(it.get("url", ""))
+        if not u_norm:
+            continue
+        prev = by_url.get(u_norm)
+        if prev is None or _score(it) > _score(prev):
+            by_url[u_norm] = dict(it, url=u_norm)
+
+    # 2) Within each hostname, dedupe by (hostname, normalized title)
+    def _norm_title(s: str) -> str:
+        s2 = (s or "").strip().lower()
+        s2 = re.sub(r"\s+", " ", s2)
+        return s2
+
+    host_title_best: dict[tuple[str, str], dict] = {}
+    for it in by_url.values():
+        host = _hostname(it.get("url", ""))
+        title_key = _norm_title(it.get("title", ""))
+        key = (host, title_key)
+        prev = host_title_best.get(key)
+        if prev is None or _score(it) > _score(prev):
+            host_title_best[key] = it
+
+    deduped = list(host_title_best.values())
+
+    # 3) Optionally validate URLs (2xx). Keep fast timeouts and fail-open when no network.
+    def _http_ok(url: str, timeout: float = 6.0) -> bool:
+        try:
+            if requests is not None:
+                try:
+                    r = requests.head(url, timeout=timeout, allow_redirects=True)
+                except Exception:
+                    r = requests.get(url, timeout=timeout, allow_redirects=True)
+                return 200 <= int(getattr(r, "status_code", 0)) < 300
+            # stdlib fallback
+            try:
+                req = _UrlRequest(url, method="HEAD")
+                with _urlopen(req, timeout=timeout) as resp:
+                    code = getattr(resp, "status", 200)
+                return 200 <= int(code) < 300
+            except Exception:
+                req = _UrlRequest(url, method="GET")
+                with _urlopen(req, timeout=timeout) as resp:
+                    code = getattr(resp, "status", 200)
+                return 200 <= int(code) < 300
+        except Exception:
+            return False
+
+    validated: list[dict] = []
+    for it in deduped:
+        u = it.get("url", "")
+        if not u:
+            continue
+        if not _http_ok(u):
+            continue
+        validated.append(it)
+
+    # If validation removed everything, fall back to deduped set
+    final_items = validated or deduped
+
+    if not final_items:
         return [], "NO_SEARCH_RESULTS", tavily_debug
 
     # Compact context string given to the model
-    lines = [f"{i+1}. {it['title']} — {it['url']}" for i, it in enumerate(deduped)]
-    return deduped, "\n".join(lines), tavily_debug
+    lines = [f"{i+1}. {it['title']} — {it['url']}" for i, it in enumerate(final_items)]
+    return final_items, "\n".join(lines), tavily_debug
 
 
 def _build_stub_payload(run_type: str) -> dict:
