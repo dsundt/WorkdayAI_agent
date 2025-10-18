@@ -25,6 +25,7 @@ jobs:
       - name: Generate weekly report
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           GMAIL_USERNAME: ${{ secrets.GMAIL_USERNAME }}
