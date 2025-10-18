@@ -17,6 +17,10 @@ try:
 except Exception:  # pragma: no cover - environment without requests
     requests = None  # type: ignore
 
+# Lightweight stdlib HTTP fallback so Tavily works even without 'requests'
+from urllib.request import Request as _UrlRequest, urlopen as _urlopen  # type: ignore
+from urllib.error import HTTPError as _HTTPError, URLError as _URLError  # type: ignore
+
 # ====== Secrets / Env ======
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 # Allow overriding model from environment; choose a strong default for best results
@@ -445,13 +449,19 @@ def tavily_search(
         debug_log.append(entry)
 
     entry["api_key_present"] = bool(TAVILY_API_KEY)
-    if not TAVILY_API_KEY or requests is None:
-        reason = "missing_api_key" if not TAVILY_API_KEY else "requests_unavailable"
+    if not TAVILY_API_KEY:
+        # Without an API key we cannot call Tavily; record and skip gracefully
         entry["status"] = "skipped"
-        entry["reason"] = reason
+        entry["reason"] = "missing_api_key"
         return []
+
     url = "https://api.tavily.com/search"
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {TAVILY_API_KEY}"}
+    # Use official Tavily header; keep Authorization as a secondary for broader compatibility
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": TAVILY_API_KEY,
+        "Authorization": f"Bearer {TAVILY_API_KEY}",
+    }
     payload = {
         "query": query,
         "search_depth": TAVILY_SEARCH_DEPTH,
@@ -465,15 +475,40 @@ def tavily_search(
     entry["request_payload"] = copy.deepcopy(payload)
     entry["request_headers"] = {
         "Content-Type": "application/json",
+        "x-api-key": _mask_secret(TAVILY_API_KEY),
         "Authorization": f"Bearer {_mask_secret(TAVILY_API_KEY)}",
     }
+
+    # Perform POST using requests if available, otherwise stdlib urllib
     try:
-        r = requests.post(url, headers=headers, data=json.dumps(payload), timeout=20)
-        r.raise_for_status()
-        data = r.json()
-    except Exception as exc:
+        if requests is not None:
+            resp = requests.post(url, headers=headers, json=payload, timeout=20)
+            resp.raise_for_status()
+            data = resp.json()
+        else:
+            req = _UrlRequest(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            with _urlopen(req, timeout=20) as resp2:
+                raw = resp2.read().decode("utf-8", errors="ignore")
+            try:
+                data = json.loads(raw)
+            except Exception:
+                raise RuntimeError(f"Non-JSON response from Tavily: {raw[:240]}")
+    except (_HTTPError, _URLError, Exception) as exc:  # pragma: no cover - network dependent
         entry["status"] = "error"
+        # Try to summarize requests HTTP errors; otherwise fall back to string
         summary = _summarize_http_error(exc)
+        if not summary and isinstance(exc, _HTTPError):
+            try:
+                body = exc.read().decode("utf-8", errors="ignore").strip()
+            except Exception:
+                body = ""
+            if body:
+                summary = f"HTTP {getattr(exc, 'code', 'error')}: {body[:240]}"
         entry["error"] = summary or str(exc)
         return []
     out = []
