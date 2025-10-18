@@ -27,8 +27,10 @@ def test_daily_generates_index_html():
         assert not any(ch in val for ch in ["\u201C", "\u201D", "\u2018", "\u2019"])  # no smart quotes
         assert val.startswith(("http://", "https://", "mailto:", "tel:", "#"))
 
-    # Ensure debug block is present with the prompt
+    # Ensure debug blocks are present
     assert "Prompt sent to OpenAI" in content
+    assert "Tavily Debug" in content
+    assert "Reason:" in content
 
 
 def test_weekly_generates_weekly_html():
@@ -44,5 +46,6 @@ def test_weekly_generates_weekly_html():
         assert not any(ch in val for ch in ["\u201C", "\u201D", "\u2018", "\u2019"])  # no smart quotes
         assert val.startswith(("http://", "https://", "mailto:", "tel:", "#"))
 
-    # Ensure debug block is present with the prompt
+    # Ensure debug blocks are present
     assert "Prompt sent to OpenAI" in content
+    assert "Tavily Debug" in content

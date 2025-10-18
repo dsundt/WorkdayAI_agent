@@ -158,6 +158,17 @@ RESPONSES_JSON_SCHEMA = {
 }
 
 
+def _mask_secret(secret: str, visible: int = 4) -> str:
+    """Return a masked representation of a secret for debugging output."""
+
+    secret = (secret or "").strip()
+    if not secret:
+        return ""
+    if len(secret) <= visible:
+        return "*" * len(secret)
+    return f"{secret[:visible]}…{'*' * max(len(secret) - visible, 0)}"
+
+
 def _unique_payload_variants(payloads: list[dict]) -> list[dict]:
     """Return payload variants with duplicates removed while preserving order."""
 
@@ -410,13 +421,34 @@ Parameters:
 DEBUG_DIR = os.path.join("docs", "debug")
 
 
-def tavily_search(query: str, time_range: str, include_domains: list[str] | None = None, max_results: int = 10):
+def tavily_search(
+    query: str,
+    time_range: str,
+    include_domains: list[str] | None = None,
+    max_results: int = 10,
+    debug_log: list[dict] | None = None,
+):
     """
     Call Tavily /search and return [{title,url,snippet,source,date}, ...].
     time_range: "day","week","month","year"
     search_depth: "basic" (1 credit) or "advanced" (2 credits)
     """
+    entry: dict[str, object] = {
+        "query": query,
+        "time_range": time_range,
+        "search_depth": TAVILY_SEARCH_DEPTH,
+        "max_results": max_results,
+    }
+    if include_domains:
+        entry["include_domains"] = list(include_domains)
+    if debug_log is not None:
+        debug_log.append(entry)
+
+    entry["api_key_present"] = bool(TAVILY_API_KEY)
     if not TAVILY_API_KEY or requests is None:
+        reason = "missing_api_key" if not TAVILY_API_KEY else "requests_unavailable"
+        entry["status"] = "skipped"
+        entry["reason"] = reason
         return []
     url = "https://api.tavily.com/search"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {TAVILY_API_KEY}"}
@@ -430,11 +462,19 @@ def tavily_search(query: str, time_range: str, include_domains: list[str] | None
     }
     if include_domains:
         payload["include_domains"] = include_domains
+    entry["request_payload"] = copy.deepcopy(payload)
+    entry["request_headers"] = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {_mask_secret(TAVILY_API_KEY)}",
+    }
     try:
         r = requests.post(url, headers=headers, data=json.dumps(payload), timeout=20)
         r.raise_for_status()
         data = r.json()
-    except Exception:
+    except Exception as exc:
+        entry["status"] = "error"
+        summary = _summarize_http_error(exc)
+        entry["error"] = summary or str(exc)
         return []
     out = []
     for item in data.get("results", []) or []:
@@ -448,6 +488,10 @@ def tavily_search(query: str, time_range: str, include_domains: list[str] | None
             "source": (item.get("source") or "").strip(),
             "date": item.get("published_date") or None
         })
+    entry["status"] = "ok"
+    entry["result_count"] = len(out)
+    entry["response_payload"] = copy.deepcopy(data)
+    entry["response_results"] = copy.deepcopy(out)
     return out
 
 
@@ -468,8 +512,17 @@ def build_context(run_type: str):
         "Workday partner GSI AI"
     ]
     results = []
+    tavily_debug: list[dict] = []
     for q in queries:
-        results.extend(tavily_search(q, time_range, include_domains=PREFERRED_DOMAINS, max_results=10))
+        results.extend(
+            tavily_search(
+                q,
+                time_range,
+                include_domains=PREFERRED_DOMAINS,
+                max_results=10,
+                debug_log=tavily_debug,
+            )
+        )
 
     # de-duplicate by URL
     seen = set()
@@ -482,11 +535,11 @@ def build_context(run_type: str):
         deduped.append(it)
 
     if not deduped:
-        return [], "NO_SEARCH_RESULTS"
+        return [], "NO_SEARCH_RESULTS", tavily_debug
 
     # Compact context string given to the model
     lines = [f"{i+1}. {it['title']} — {it['url']}" for i, it in enumerate(deduped)]
-    return deduped, "\n".join(lines)
+    return deduped, "\n".join(lines), tavily_debug
 
 
 def _build_stub_payload(run_type: str) -> dict:
@@ -967,7 +1020,7 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
     so CI can continue (and Pages/email still get generated).
     """
     # Gather Tavily context and build prompts up-front for debugging
-    context_results, context_text_or_flag = build_context(run_type)
+    context_results, context_text_or_flag, tavily_debug = build_context(run_type)
     if context_text_or_flag == "NO_SEARCH_RESULTS":
         payload = _build_no_results_payload(run_type)
         payload["_debug_endpoint"] = "no-search-results"
@@ -976,6 +1029,7 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
         payload["_debug_live"] = False
         payload["_debug_context_sources"] = context_results
         payload["_debug_context_text"] = context_text_or_flag
+        payload["_debug_tavily"] = tavily_debug
         return payload
 
     context_text = context_text_or_flag
@@ -1014,6 +1068,7 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
         payload["_debug_live"] = False
         payload["_debug_context_sources"] = context_results
         payload["_debug_context_text"] = context_text
+        payload["_debug_tavily"] = tavily_debug
         return payload
 
     if requests is None:
@@ -1214,6 +1269,7 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
                     payload["_debug_live"] = True
                     payload["_debug_context_sources"] = context_results
                     payload["_debug_context_text"] = context_text
+                    payload["_debug_tavily"] = tavily_debug
                     try:
                         payload["_debug_parsed_from_content"] = json.loads(
                             json.dumps(payload, ensure_ascii=False)
@@ -1240,6 +1296,7 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
                     stub_payload["_debug_live"] = False
                     stub_payload["_debug_context_sources"] = context_results
                     stub_payload["_debug_context_text"] = context_text
+                    stub_payload["_debug_tavily"] = tavily_debug
                     return stub_payload
                 continue
 
@@ -1256,6 +1313,7 @@ def call_openai(run_type: str, mode: str = "auto") -> dict:
         payload["_debug_live"] = False
         payload["_debug_context_sources"] = context_results
         payload["_debug_context_text"] = context_text
+        payload["_debug_tavily"] = tavily_debug
         return payload
     # Fallback (should not be reached)
     if last_error:
@@ -1322,6 +1380,7 @@ def write_html_to_pages(run_type: str, payload: dict) -> str:
             )
         )
 
+    debug_block = ""
     if debug_sections:
         live_status = "Live OpenAI response" if debug_live else "Stub preview (no live response)"
         meta = (
@@ -1331,7 +1390,105 @@ def write_html_to_pages(run_type: str, payload: dict) -> str:
             f"<strong>Endpoint:</strong> {html_lib.escape(str(debug_endpoint))} &nbsp; "
             f"<strong>Model:</strong> {html_lib.escape(str(debug_model))}</p>"
         )
-        html = html + meta + "".join(debug_sections)
+        debug_block = meta + "".join(debug_sections)
+
+    tavily_debug_html = ""
+    tavily_debug = payload.get("_debug_tavily")
+    if isinstance(tavily_debug, list) and tavily_debug:
+        sections: list[str] = []
+        for idx, entry in enumerate(tavily_debug, start=1):
+            if not isinstance(entry, dict):
+                continue
+            query = html_lib.escape(str(entry.get("query", "") or f"Search {idx}"))
+            status_raw = str(entry.get("status", "unknown"))
+            status_label = html_lib.escape(status_raw.replace("_", " ").title())
+            summary = f"<details{' open' if idx == 1 else ''}><summary><strong>{query}</strong> — {status_label}</summary>"
+            body_parts = ["<div style=\"margin:12px 0 24px\">"]
+
+            time_range = entry.get("time_range")
+            if time_range:
+                body_parts.append(
+                    f"<p><strong>Time range:</strong> {html_lib.escape(str(time_range))}</p>"
+                )
+            include_domains = entry.get("include_domains")
+            if include_domains:
+                try:
+                    domains_joined = ", ".join(str(d) for d in include_domains)
+                except Exception:
+                    domains_joined = str(include_domains)
+                body_parts.append(
+                    f"<p><strong>Preferred domains:</strong> {html_lib.escape(domains_joined)}</p>"
+                )
+            result_count = entry.get("result_count")
+            if isinstance(result_count, int):
+                plural = "s" if result_count != 1 else ""
+                body_parts.append(
+                    f"<p><strong>Result count:</strong> {result_count} item{plural}</p>"
+                )
+            api_key_present = entry.get("api_key_present")
+            if api_key_present is not None:
+                status = "Yes" if api_key_present else "No"
+                body_parts.append(
+                    f"<p><strong>Tavily API key detected:</strong> {status}</p>"
+                )
+            reason = entry.get("reason")
+            if reason:
+                body_parts.append(
+                    f"<p><strong>Reason:</strong> {html_lib.escape(str(reason))}</p>"
+                )
+            error = entry.get("error")
+            if error:
+                body_parts.append(
+                    f"<p><strong>Error:</strong> {html_lib.escape(str(error))}</p>"
+                )
+
+            request_payload = entry.get("request_payload")
+            if request_payload is not None:
+                try:
+                    request_dump = json.dumps(request_payload, ensure_ascii=False, indent=2)
+                except Exception:
+                    request_dump = repr(request_payload)
+                body_parts.append(
+                    "<details open><summary><strong>Request payload</strong></summary>"
+                    "<pre style=\"white-space:pre-wrap;overflow-x:auto;border:1px solid #ddd;padding:12px;"
+                    "border-radius:6px;background:#fafafa;margin-top:12px\">"
+                    f"{html_lib.escape(request_dump)}" "</pre></details>"
+                )
+
+            request_headers = entry.get("request_headers")
+            if request_headers is not None:
+                try:
+                    headers_dump = json.dumps(request_headers, ensure_ascii=False, indent=2)
+                except Exception:
+                    headers_dump = repr(request_headers)
+                body_parts.append(
+                    "<details><summary><strong>Request headers</strong></summary>"
+                    "<pre style=\"white-space:pre-wrap;overflow-x:auto;border:1px solid #ddd;padding:12px;"
+                    "border-radius:6px;background:#eef5ff;margin-top:12px\">"
+                    f"{html_lib.escape(headers_dump)}" "</pre></details>"
+                )
+
+            response_payload = entry.get("response_payload")
+            if response_payload is not None:
+                try:
+                    response_dump = json.dumps(response_payload, ensure_ascii=False, indent=2)
+                except Exception:
+                    response_dump = repr(response_payload)
+                body_parts.append(
+                    "<details><summary><strong>Raw Tavily response JSON</strong></summary>"
+                    "<pre style=\"white-space:pre-wrap;overflow-x:auto;border:1px solid #ddd;padding:12px;"
+                    "border-radius:6px;background:#fff9e6;margin-top:12px\">"
+                    f"{html_lib.escape(response_dump)}" "</pre></details>"
+                )
+
+            body_parts.append("</div>")
+            sections.append(summary + "".join(body_parts) + "</details>")
+
+        if sections:
+            tavily_debug_html = "<hr><h3>Tavily Debug</h3>" + "".join(sections)
+
+    if debug_block or tavily_debug_html:
+        html = html + debug_block + tavily_debug_html
     wrapper = (
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
