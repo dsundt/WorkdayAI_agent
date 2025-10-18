@@ -370,7 +370,7 @@ DATE CONTEXT (ET):
 Topic scope: Workday; Workday HCM (Human Capital Management); Workday AI; agentic AI for Workday; broader AI for HR technology; consultant upskilling; SI/GSI (Systems Integrators / Global Systems Integrators) competitive moves.
 
 Rules for DAILY brief:
-- Target ~600 words total.
+- Target ~1000 words total.
 - Prefer items published in the LAST_48H_WINDOW (from {YESTERDAY_ET} to {TODAY_ET}). If nothing relevant exists, choose the most recent credible items and explicitly say “No material items in last 48 hours; including nearest recent updates.”
 - For every item, include a working public URL and state why it matters to Deloitte’s Workday practice (client conversations, offering strategy, enablement, competitive posture).
 - Include the publication date for each “highlight” item in its text (e.g., “(Published: 2025-10-15)”).
@@ -395,7 +395,7 @@ DATE WINDOW (ET):
 Topic scope: Workday; Workday HCM (Human Capital Management); Workday AI; agentic AI for Workday; broader AI for HR technology; consultant upskilling; SI/GSI (Systems Integrators / Global Systems Integrators) competitive moves.
 
 Rules for WEEKLY deep dive:
-- Target 1000-1500 words.
+- Target 2000-2500 words.
 - Synthesize trends across the window and include a <h3>What changed this week</h3> section.
 - For every item, include a working public URL and state why it matters to Deloitte’s Workday practice.
 - Include the publication date for each “highlight” item in its text (e.g., “(Published: 2025-10-12)”).
@@ -440,8 +440,8 @@ Return JSON ONLY in this exact shape (no code fences, no extra text):
 
 Parameters:
 - Set "run_date" to TODAY_ET = {TODAY_ET}.
-- For DAILY: set "type":"daily"; target ~250 words; prefer items in the last 48h (from {YESTERDAY_ET} to {TODAY_ET}); include publication dates in highlight text.
-- For WEEKLY: set "type":"weekly"; target 600–900 words; restrict to {WEEK_START_ET}…{TODAY_ET}; include <h3>What changed this week</h3> and publication dates in highlight text.
+- For DAILY: set "type":"daily"; target ~1000 words; prefer items in the last 48h (from {YESTERDAY_ET} to {TODAY_ET}); include publication dates in highlight text.
+- For WEEKLY: set "type":"weekly"; target 2000–2500 words; restrict to {WEEK_START_ET}…{TODAY_ET}; include <h3>What changed this week</h3> and publication dates in highlight text.
 - Section order for html_body: Highlights; Competitive Watch; Enablement; Actions for Next Week; Risks & Mitigations; All Sources.
 - Every item must include at least one absolute URL (https://…).
 - Keep total HTML under ~25KB.
