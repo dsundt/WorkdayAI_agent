@@ -158,6 +158,17 @@ RESPONSES_JSON_SCHEMA = {
 }
 
 
+def _mask_secret(secret: str, visible: int = 4) -> str:
+    """Return a masked representation of a secret for debugging output."""
+
+    secret = (secret or "").strip()
+    if not secret:
+        return ""
+    if len(secret) <= visible:
+        return "*" * len(secret)
+    return f"{secret[:visible]}…{'*' * max(len(secret) - visible, 0)}"
+
+
 def _unique_payload_variants(payloads: list[dict]) -> list[dict]:
     """Return payload variants with duplicates removed while preserving order."""
 
@@ -433,6 +444,7 @@ def tavily_search(
     if debug_log is not None:
         debug_log.append(entry)
 
+    entry["api_key_present"] = bool(TAVILY_API_KEY)
     if not TAVILY_API_KEY or requests is None:
         reason = "missing_api_key" if not TAVILY_API_KEY else "requests_unavailable"
         entry["status"] = "skipped"
@@ -451,6 +463,10 @@ def tavily_search(
     if include_domains:
         payload["include_domains"] = include_domains
     entry["request_payload"] = copy.deepcopy(payload)
+    entry["request_headers"] = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {_mask_secret(TAVILY_API_KEY)}",
+    }
     try:
         r = requests.post(url, headers=headers, data=json.dumps(payload), timeout=20)
         r.raise_for_status()
@@ -1409,6 +1425,12 @@ def write_html_to_pages(run_type: str, payload: dict) -> str:
                 body_parts.append(
                     f"<p><strong>Result count:</strong> {result_count} item{plural}</p>"
                 )
+            api_key_present = entry.get("api_key_present")
+            if api_key_present is not None:
+                status = "Yes" if api_key_present else "No"
+                body_parts.append(
+                    f"<p><strong>Tavily API key detected:</strong> {status}</p>"
+                )
             reason = entry.get("reason")
             if reason:
                 body_parts.append(
@@ -1431,6 +1453,19 @@ def write_html_to_pages(run_type: str, payload: dict) -> str:
                     "<pre style=\"white-space:pre-wrap;overflow-x:auto;border:1px solid #ddd;padding:12px;"
                     "border-radius:6px;background:#fafafa;margin-top:12px\">"
                     f"{html_lib.escape(request_dump)}" "</pre></details>"
+                )
+
+            request_headers = entry.get("request_headers")
+            if request_headers is not None:
+                try:
+                    headers_dump = json.dumps(request_headers, ensure_ascii=False, indent=2)
+                except Exception:
+                    headers_dump = repr(request_headers)
+                body_parts.append(
+                    "<details><summary><strong>Request headers</strong></summary>"
+                    "<pre style=\"white-space:pre-wrap;overflow-x:auto;border:1px solid #ddd;padding:12px;"
+                    "border-radius:6px;background:#eef5ff;margin-top:12px\">"
+                    f"{html_lib.escape(headers_dump)}" "</pre></details>"
                 )
 
             response_payload = entry.get("response_payload")
