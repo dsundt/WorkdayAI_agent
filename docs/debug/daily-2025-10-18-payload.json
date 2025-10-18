@@ -42,9 +42,9 @@
         "oracle.com",
         "sap.com"
       ],
-      "api_key_present": true,
+      "api_key_present": false,
       "status": "skipped",
-      "reason": "requests_unavailable"
+      "reason": "missing_api_key"
     },
     {
       "query": "site:blog.workday.com (AI OR artificial intelligence OR genai) Workday HCM",
@@ -70,9 +70,9 @@
         "oracle.com",
         "sap.com"
       ],
-      "api_key_present": true,
+      "api_key_present": false,
       "status": "skipped",
-      "reason": "requests_unavailable"
+      "reason": "missing_api_key"
     },
     {
       "query": "site:newsroom.workday.com Workday AI HCM",
@@ -98,9 +98,9 @@
         "oracle.com",
         "sap.com"
       ],
-      "api_key_present": true,
+      "api_key_present": false,
       "status": "skipped",
-      "reason": "requests_unavailable"
+      "reason": "missing_api_key"
     },
     {
       "query": "agentic AI Workday HCM",
@@ -126,9 +126,9 @@
         "oracle.com",
         "sap.com"
       ],
-      "api_key_present": true,
+      "api_key_present": false,
       "status": "skipped",
-      "reason": "requests_unavailable"
+      "reason": "missing_api_key"
     },
     {
       "query": "Workday skills cloud AI",
@@ -154,9 +154,9 @@
         "oracle.com",
         "sap.com"
       ],
-      "api_key_present": true,
+      "api_key_present": false,
       "status": "skipped",
-      "reason": "requests_unavailable"
+      "reason": "missing_api_key"
     },
     {
       "query": "Workday partner GSI AI",
@@ -182,9 +182,9 @@
         "oracle.com",
         "sap.com"
       ],
-      "api_key_present": true,
+      "api_key_present": false,
       "status": "skipped",
-      "reason": "requests_unavailable"
+      "reason": "missing_api_key"
     }
   ]
 }
