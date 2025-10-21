@@ -358,6 +358,9 @@ now_et = datetime.now(ET)
 TODAY_ET = now_et.strftime("%Y-%m-%d")               # e.g., 2025-10-16
 YESTERDAY_ET = (now_et - timedelta(days=1)).strftime("%Y-%m-%d")
 WEEK_START_ET = (now_et - timedelta(days=7)).strftime("%Y-%m-%d")
+# 24h window anchors (ET) for stricter daily filtering and clearer prompts
+NOW_ET_ISO = now_et.strftime("%Y-%m-%dT%H:%M")
+START_24H_ET_ISO = (now_et - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M")
 
 # ====== System Prompts with Explicit ET Context ======
 SYSTEM_PROMPT_DAILY = f"""
@@ -366,7 +369,7 @@ Produce a comprehensive JSON object that matches the schema I will give you exac
 
 DATE CONTEXT (ET)
 - TODAY_ET = {TODAY_ET}
-- LAST_48H_WINDOW = {YESTERDAY_ET} → {TODAY_ET} inclusive
+- LAST_24H_WINDOW_ET = {START_24H_ET_ISO} → {NOW_ET_ISO} inclusive
 
 RESEARCH SCOPE
 Focus on Workday and its ecosystem — Workday HCM, Workday Extend, Workday Skills Cloud, Workday AI Marketplace, and all agentic or autonomous AI capabilities in SaaS solutions. 
@@ -386,11 +389,11 @@ WRITING EXPECTATIONS
 - Incorporate synthesis across related articles (e.g., “Across multiple GSIs…” or “Several sources indicate…”).
 - Prioritize insights, nuance, and context over mere headlines.
 - Every key claim must cite a valid source URL from the provided SOURCE LIST.
-- If no credible items are found in the last 48h, produce an honest “no significant updates” section.
+- If no credible items are found in the last 24h, produce an honest “no significant updates” section.
 
 FORMATTING RULES
 - Return JSON only (no Markdown or prose outside the object).
-- `html_body` must be valid, minimal HTML (<h2>, <h3>, <p>, <ul>, <li>, <a href="...">).
+- `html_body` must be valid, minimal HTML (<h2>, <h3>, <p>, <ul>, <li>, <a href=\"...\">).
 - Section order: Highlights; Competitive Watch; Enablement; Actions for Next Week; Risks & Mitigations; All Sources.
 - Keep total HTML under 35 KB.
 - `plain_text_body` must be readable text with visible URLs.
@@ -465,7 +468,7 @@ Return JSON ONLY in this exact shape (no code fences, no extra text):
 
 Parameters:
 - Set "run_date" to TODAY_ET = {TODAY_ET}.
-- For DAILY: set "type":"daily"; target ~1000 words; prefer items in the last 48h (from {YESTERDAY_ET} to {TODAY_ET}); include publication dates in highlight text.
+- For DAILY: set "type":"daily"; target ~1000 words; STRICTLY restrict to the last 24 hours (from {START_24H_ET_ISO} to {NOW_ET_ISO}); include publication dates in highlight text.
 - For WEEKLY: set "type":"weekly"; target 2000–2500 words; restrict to {WEEK_START_ET}…{TODAY_ET}; include <h3>What changed this week</h3> and publication dates in highlight text.
 - Section order for html_body: Highlights; Competitive Watch; Enablement; Actions for Next Week; Risks & Mitigations; All Sources.
 - Every item must include at least one absolute URL (https://…).
@@ -877,6 +880,72 @@ def build_context(run_type: str):
 
     # If validation removed everything, fall back to deduped set
     final_items = validated or deduped
+
+    # ---- Enforce 24h window for DAILY runs using ET anchors ----
+    if run_type == "daily" and final_items:
+        window_start = now_et - timedelta(hours=24)
+
+        def _parse_pub_date(raw: object) -> datetime | None:
+            if not raw:
+                return None
+            try:
+                s = str(raw).strip()
+                # Fast-path: ISO with Z
+                if s.endswith("Z"):
+                    s = s[:-1] + "+00:00"
+                # Try full ISO first
+                try:
+                    dt = datetime.fromisoformat(s)
+                except Exception:
+                    dt = None
+                # Fallbacks
+                if dt is None:
+                    # Common RFC3339 without seconds
+                    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M%z", "%Y-%m-%d %H:%M:%S%z"):
+                        try:
+                            dt = datetime.strptime(s, fmt)
+                            break
+                        except Exception:
+                            continue
+                if dt is None:
+                    # Date-only. Accept only if it's TODAY_ET (conservative)
+                    try:
+                        d = datetime.strptime(s, "%Y-%m-%d").date()
+                        if d.strftime("%Y-%m-%d") == TODAY_ET:
+                            # Treat as today at 00:00 ET
+                            dt = datetime.combine(d, datetime.min.time(), ET)
+                        else:
+                            return None
+                    except Exception:
+                        return None
+                # Ensure timezone-aware; if naive, reject (cannot compare reliably)
+                if dt.tzinfo is None:
+                    return None
+                return dt.astimezone(ET)
+            except Exception:
+                return None
+
+        filtered: list[dict] = []
+        for it in final_items:
+            pub = _parse_pub_date(it.get("date"))
+            if pub is not None and pub >= window_start:
+                filtered.append(it)
+
+        # Record filtering summary for debug rendering
+        try:
+            tavily_debug.append({
+                "query": "POST-FILTER: enforce last 24h (ET)",
+                "status": "ok",
+                "time_range": "day",
+                "result_count": len(final_items),
+                "filter_window": f"{(window_start).strftime('%Y-%m-%dT%H:%M')} → {now_et.strftime('%Y-%m-%dT%H:%M')} ET",
+                "filter_kept": len(filtered),
+                "filter_dropped": max(len(final_items) - len(filtered), 0),
+            })
+        except Exception:
+            pass
+
+        final_items = filtered
 
     if not final_items:
         return [], "NO_SEARCH_RESULTS", tavily_debug
