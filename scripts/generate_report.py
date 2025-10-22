@@ -76,6 +76,12 @@ _DEFAULT_PREFERRED_DOMAINS = [
 
     # Standards / policy (risk, compliance)
     "nist.gov", "eeoc.gov", "europa.eu",
+
+    # HR/enterprise tech and strategy (broadened but credible)
+    "shrm.org", "hrdive.com",
+    "cio.com", "zdnet.com", "computerworld.com", "informationweek.com", "infoworld.com",
+    "siliconangle.com",
+    "hbr.org", "mckinsey.com", "bcg.com", "bain.com",
 ]
 _preferred_domains_env = os.environ.get("TAVILY_PREFERRED_DOMAINS", "").strip()
 if _preferred_domains_env:
@@ -670,6 +676,36 @@ def build_context(run_type: str):
             "site:onesourcevirtual.com Workday AI",
             "site:alight.com Workday Workday AI",
             "site:mercer.com Workday AI",
+
+            # Adjacent agentic AI in enterprise/HR context (broadened)
+            "Agentic AI HR operations",
+            "Agentic AI HCM enterprise",
+            "enterprise AI agents HR",
+            "HR service delivery AI agents",
+            "talent acquisition AI agent",
+            "payroll AI agent enterprise",
+            "employee experience AI copilot HR",
+            "skills graph agentic AI HR",
+            "people analytics generative AI HR",
+            "Responsible AI HR operations enterprise",
+
+            # GSI agentic AI (HR/enterprise context)
+            "Accenture agentic AI HR",
+            "Deloitte agentic AI HR",
+            "EY agentic AI HR",
+            "KPMG agentic AI HR",
+            "PwC agentic AI HR",
+            "IBM agentic AI HR",
+            "Capgemini agentic AI HR",
+            "Infosys agentic AI HR",
+            "TCS agentic AI HR",
+            "Wipro agentic AI HR",
+
+            # Strategy/insight adjacent (enterprise impact on HR)
+            "Harvard Business Review agentic AI HR",
+            "McKinsey agentic AI HR",
+            "BCG agentic AI HR",
+            "Bain agentic AI HR",
         ]
 
     def _weekly_queries(now: datetime) -> list[str]:
@@ -752,20 +788,20 @@ def build_context(run_type: str):
     results: list[dict] = []
     tavily_debug: list[dict] = []
 
-    # First pass: bias to preferred domains
+    # First pass: bias to preferred domains (broadened result count)
     for q in queries:
         results.extend(
             tavily_search(
                 q,
                 time_range,
                 include_domains=PREFERRED_DOMAINS,
-                max_results=10,
+                max_results=15,
                 debug_log=tavily_debug,
             )
         )
 
     # Optional broaden pass if not enough results
-    broaden_threshold = 8
+    broaden_threshold = 12
     if len(results) < broaden_threshold:
         for q in queries:
             results.extend(
@@ -773,7 +809,7 @@ def build_context(run_type: str):
                     q,
                     time_range,
                     include_domains=None,
-                    max_results=5,
+                    max_results=10,
                     debug_log=tavily_debug,
                 )
             )
@@ -881,7 +917,7 @@ def build_context(run_type: str):
     # If validation removed everything, fall back to deduped set
     final_items = validated or deduped
 
-    # ---- Enforce 24h window for DAILY runs using ET anchors ----
+    # ---- Enforce 24h window for DAILY runs using ET anchors (relaxed for missing/naive dates) ----
     if run_type == "daily" and final_items:
         window_start = now_et - timedelta(hours=24)
 
@@ -901,7 +937,8 @@ def build_context(run_type: str):
                 # Fallbacks
                 if dt is None:
                     # Common RFC3339 without seconds
-                    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M%z", "%Y-%m-%d %H:%M:%S%z"):
+                    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M%z", "%Y-%m-%d %H:%M:%S%z",
+                                "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S"):
                         try:
                             dt = datetime.strptime(s, fmt)
                             break
@@ -918,18 +955,45 @@ def build_context(run_type: str):
                             return None
                     except Exception:
                         return None
-                # Ensure timezone-aware; if naive, reject (cannot compare reliably)
+                # If timezone-naive, assume ET to avoid over-dropping fresh items
                 if dt.tzinfo is None:
-                    return None
+                    dt = dt.replace(tzinfo=ET)
                 return dt.astimezone(ET)
             except Exception:
                 return None
 
+        # Keep items explicitly in window; for items without reliable dates, keep when relevant
+        def _looks_relevant(item: dict) -> bool:
+            title = (item.get("title") or "").lower()
+            snippet = (item.get("snippet") or "").lower()
+            url = (item.get("url") or "").lower()
+            host = _hostname(url)
+            keywords = {
+                "workday", "hcm", "hr ", "human resources", "agentic", "agent", "copilot", "ai",
+                "skills cloud", "extend", "prism", "marketplace",
+            }
+            text = f"{title} {snippet} {url}"
+            matches_kw = any(k in text for k in keywords)
+            in_pref_domain = host in {d.lstrip('www.') for d in PREFERRED_DOMAINS}
+            return matches_kw or in_pref_domain
+
         filtered: list[dict] = []
+        kept_missing_date = 0
+        dropped_by_date = 0
         for it in final_items:
             pub = _parse_pub_date(it.get("date"))
-            if pub is not None and pub >= window_start:
-                filtered.append(it)
+            if pub is not None:
+                if pub >= window_start:
+                    filtered.append(it)
+                else:
+                    dropped_by_date += 1
+            else:
+                # No parseable date: keep if relevant to our HR/Workday/agentic focus
+                if _looks_relevant(it):
+                    filtered.append(it)
+                    kept_missing_date += 1
+                else:
+                    dropped_by_date += 1
 
         # Record filtering summary for debug rendering
         try:
@@ -940,7 +1004,9 @@ def build_context(run_type: str):
                 "result_count": len(final_items),
                 "filter_window": f"{(window_start).strftime('%Y-%m-%dT%H:%M')} → {now_et.strftime('%Y-%m-%dT%H:%M')} ET",
                 "filter_kept": len(filtered),
-                "filter_dropped": max(len(final_items) - len(filtered), 0),
+                "filter_dropped": dropped_by_date,
+                "filter_kept_missing_date": kept_missing_date,
+                "note": "Relaxed: kept items with missing/naive dates when relevant",
             })
         except Exception:
             pass
